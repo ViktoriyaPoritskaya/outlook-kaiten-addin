@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <title>Kaiten — настройки</title>
+    <script
+      type="text/javascript"
+      src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"
+    ></script>
+    <script type="text/javascript" src="config.js"></script>
+    <script type="text/javascript" src="settings.js"></script>
+    <script type="text/javascript" src="kaiten-api.js"></script>
+    <style>
+      :root {
+        --fg: #1f1f1f;
+        --muted: #666;
+        --bg: #ffffff;
+        --border: #d8d8d8;
+        --accent: #2173eb;
+        --accent-hover: #155bbf;
+        --ok: #107c10;
+        --warn: #b86b00;
+        --err: #a4262c;
+        --bg-soft: #f7f9fc;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 13px;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0 0 4px 0;
+      }
+      .subtitle {
+        color: var(--muted);
+        margin: 0 0 16px 0;
+        font-size: 12px;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin: 14px 0 4px 0;
+      }
+      input[type="text"],
+      input[type="password"],
+      select {
+        width: 100%;
+        padding: 7px 9px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-size: 13px;
+        font-family: inherit;
+      }
+      input:focus,
+      select:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+        border-color: var(--accent);
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 11px;
+        margin: 4px 0 0 0;
+        line-height: 1.4;
+      }
+      .hint a {
+        color: var(--accent);
+      }
+      button {
+        cursor: pointer;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        padding: 8px 14px;
+        border-radius: 4px;
+        font-size: 13px;
+        font-family: inherit;
+        font-weight: 600;
+      }
+      button:hover {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+      }
+      button.secondary {
+        background: #fff;
+        color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+        margin-top: 12px;
+      }
+      .row > *:first-child {
+        flex: 1;
+      }
+      #status {
+        margin-top: 16px;
+        padding: 10px;
+        border-radius: 4px;
+        font-size: 12px;
+        line-height: 1.5;
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        display: none;
+      }
+      #status.ok {
+        background: #f3faf3;
+        border-color: #b6e0b6;
+        color: var(--ok);
+        display: block;
+      }
+      #status.warn {
+        background: #fff8eb;
+        border-color: #ffd9a6;
+        color: var(--warn);
+        display: block;
+      }
+      #status.err {
+        background: #fdf3f4;
+        border-color: #f1c0c4;
+        color: var(--err);
+        display: block;
+      }
+      code {
+        background: #eef0f2;
+        padding: 1px 4px;
+        border-radius: 3px;
+        font-family: Consolas, monospace;
+      }
+      .small {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 16px;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Kaiten ↔ Outlook</h1>
+    <p class="subtitle">Подключение к Kaiten</p>
+
+    <label for="base-url">Адрес Kaiten</label>
+    <input id="base-url" type="text" placeholder="https://kaiten.almondtech.uz" autocomplete="off" />
+    <p class="hint">Адрес вашего Kaiten без слэша на конце. <b>Не попадает в публичные файлы</b> — хранится в вашем профиле Outlook.</p>
+
+    <label for="space-id-input">ID пространства</label>
+    <input id="space-id-input" type="text" placeholder="56" autocomplete="off" />
+    <p class="hint">Из URL вашего Kaiten: /space/<b>ID</b>/boards. <b>Не попадает в публичные файлы.</b></p>
+
+    <label for="token">API-токен Kaiten</label>
+    <input id="token" type="password" autocomplete="off" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+    <p class="hint">
+      Сгенерируй токен в Kaiten: правый верхний угол → <b>Профиль</b> → <b>Доступ к API</b> → <b>Создать токен</b>.
+      Хранится локально в твоём почтовом профиле, на хостинге расширения его нет.
+    </p>
+
+    <div class="row">
+      <button id="check" class="secondary">Проверить токен</button>
+      <button id="load-boards">Загрузить доски</button>
+    </div>
+
+    <label for="board">Доска для новых задач</label>
+    <select id="board" disabled>
+      <option value="">— сначала загрузи список —</option>
+    </select>
+    <p class="hint">Список подтягивается из пространства, указанного выше.</p>
+
+    <div class="row">
+      <button id="save">Сохранить</button>
+    </div>
+
+    <div id="status"></div>
+
+    <p class="small">
+      Что попадает в карточку:<br />
+      • <b>Тема письма</b> → название задачи<br />
+      • <b>Тело письма</b> → описание (Markdown)<br />
+      • <b>Отправитель, дата, список вложений</b> — в начало описания<br />
+      • <b>Ссылка на исходное письмо</b> — как external link на карточке
+    </p>
+
+    <script>
+      let officeReady = false;
+
+      Office.onReady(() => {
+        officeReady = true;
+
+        const settings = window.KaitenSettings;
+
+        const savedBaseUrl = settings.getBaseUrl();
+        if (savedBaseUrl) document.getElementById("base-url").value = savedBaseUrl;
+
+        const savedSpaceId = settings.getSpaceId();
+        if (savedSpaceId) document.getElementById("space-id-input").value = String(savedSpaceId);
+
+        const token = settings.getToken();
+        if (token) document.getElementById("token").value = token;
+
+        const savedBoardId = settings.getBoardId();
+        const savedBoardTitle = settings.getBoardTitle();
+        if (savedBoardId) {
+          const sel = document.getElementById("board");
+          const opt = document.createElement("option");
+          opt.value = String(savedBoardId);
+          opt.textContent = (savedBoardTitle || "Доска #" + savedBoardId) + " (сохранено)";
+          opt.selected = true;
+          sel.appendChild(opt);
+          sel.disabled = false;
+        }
+      });
+
+      document.getElementById("check").addEventListener("click", async () => {
+        if (!officeReady) return;
+        await stashConnectionFromInput();
+        await stashTokenFromInput();
+        setStatus("warn", "Проверяю токен…");
+        try {
+          const me = await window.KaitenApi.whoami();
+          setStatus(
+            "ok",
+            "Токен валиден. Авторизован как <b>" +
+              escapeHtml(me.full_name || me.username || me.email || "?") +
+              "</b>."
+          );
+        } catch (e) {
+          setStatus("err", "Не удалось проверить токен: " + escapeHtml(e.message));
+        }
+      });
+
+      document.getElementById("load-boards").addEventListener("click", async () => {
+        if (!officeReady) return;
+        await stashConnectionFromInput();
+        await stashTokenFromInput();
+        setStatus("warn", "Загружаю список досок…");
+        try {
+          const boards = await window.KaitenApi.listBoards();
+          fillBoards(boards);
+          setStatus("ok", "Загружено досок: " + boards.length + ". Выбери нужную и нажми «Сохранить».");
+        } catch (e) {
+          setStatus("err", "Не удалось загрузить доски: " + escapeHtml(e.message));
+        }
+      });
+
+      document.getElementById("save").addEventListener("click", async () => {
+        if (!officeReady) return;
+        const settings = window.KaitenSettings;
+        await stashConnectionFromInput();
+        await stashTokenFromInput();
+
+        const sel = document.getElementById("board");
+        const boardId = Number(sel.value) || 0;
+        const boardTitle = sel.options[sel.selectedIndex]
+          ? sel.options[sel.selectedIndex].textContent.replace(/ \(сохранено\)$/, "")
+          : "";
+
+        if (!boardId) {
+          setStatus("err", "Сначала загрузи и выбери доску.");
+          return;
+        }
+
+        settings.setBoardId(boardId);
+        settings.setBoardTitle(boardTitle);
+
+        try {
+          await settings.save();
+          setStatus(
+            "ok",
+            "Сохранено. Теперь кнопка «Создать задачу» будет добавлять карточки на доску <b>" +
+              escapeHtml(boardTitle) +
+              "</b>."
+          );
+        } catch (e) {
+          setStatus("err", "Не удалось сохранить: " + escapeHtml(e.message));
+        }
+      });
+
+      async function stashConnectionFromInput() {
+        const settings = window.KaitenSettings;
+        const baseUrl = document.getElementById("base-url").value.trim().replace(/\/+$/, "");
+        const spaceId = Number(document.getElementById("space-id-input").value.trim()) || 0;
+        let changed = false;
+        if (baseUrl && baseUrl !== settings.getBaseUrl()) {
+          settings.setBaseUrl(baseUrl);
+          changed = true;
+        }
+        if (spaceId && spaceId !== settings.getSpaceId()) {
+          settings.setSpaceId(spaceId);
+          changed = true;
+        }
+        if (changed) {
+          try { await settings.save(); } catch (e) { /* покажем при следующем действии */ }
+        }
+      }
+
+      async function stashTokenFromInput() {
+        const settings = window.KaitenSettings;
+        const value = document.getElementById("token").value.trim();
+        if (value && value !== settings.getToken()) {
+          settings.setToken(value);
+          try {
+            await settings.save();
+          } catch (e) {
+            /* покажем при следующем действии */
+          }
+        }
+      }
+
+      function fillBoards(boards) {
+        const sel = document.getElementById("board");
+        sel.innerHTML = "";
+        const previouslySelected = window.KaitenSettings.getBoardId();
+        boards
+          .slice()
+          .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
+          .forEach((b) => {
+            const opt = document.createElement("option");
+            opt.value = String(b.id);
+            opt.textContent = b.title + "  (id " + b.id + ")";
+            if (b.id === previouslySelected) opt.selected = true;
+            sel.appendChild(opt);
+          });
+        sel.disabled = false;
+      }
+
+      function setStatus(kind, htmlMsg) {
+        const el = document.getElementById("status");
+        el.className = kind;
+        el.innerHTML = htmlMsg;
+      }
+
+      function escapeHtml(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[c]);
+      }
+    </script>
+  </body>
+</html>
