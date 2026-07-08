@@ -11,45 +11,153 @@ Office.onReady(function () {
 
 /**
  * Точка входа кнопки «Создать задачу» в группе Kaiten.
+ * Перед созданием показывает окно выбора доски: доска по умолчанию + возможность
+ * выбрать другую только для этого письма (или отменить).
  */
 function createKaitenCard(event) {
   var item = Office.context.mailbox.item;
 
-  notify(item, "kaiten-info", "Создаю задачу в Kaiten…", "informationalMessage");
+  var token = window.KaitenSettings.getToken();
+  if (!token) {
+    notify(item, "kaiten-error", "Не настроен токен. Открой «Настройки» в группе Kaiten.", "errorMessage");
+    event.completed();
+    return;
+  }
+  var defaultBoardId = window.KaitenSettings.getBoardId();
+  if (!defaultBoardId) {
+    notify(item, "kaiten-error", "Не выбрана доска по умолчанию. Открой «Настройки» в группе Kaiten.", "errorMessage");
+    event.completed();
+    return;
+  }
+  var defaultBoardTitle = window.KaitenSettings.getBoardTitle();
 
-  run(item)
-    .then(function (card) {
-      var url = window.KaitenApi.getCardUrl(card.id);
-      notify(item, "kaiten-info", "Задача создана: #" + card.id, "informationalMessage");
-      if (window.KAITEN_CONFIG.OPEN_CARD_AFTER_CREATE) {
-        openInBrowser(url);
+  chooseBoard(defaultBoardId, defaultBoardTitle)
+    .then(function (choice) {
+      if (!choice) {
+        // Пользователь нажал «Отмена» или закрыл окно.
+        notify(item, "kaiten-info", "Создание задачи отменено.", "informationalMessage");
+        event.completed();
+        return;
       }
+
+      notify(item, "kaiten-info", "Создаю задачу в Kaiten…", "informationalMessage");
+      return run(item, choice.boardId).then(function (card) {
+        var url = window.KaitenApi.getCardUrl(card.id);
+        notify(
+          item,
+          "kaiten-info",
+          "Задача создана на доске «" + (choice.boardTitle || "?") + "»: #" + card.id,
+          "informationalMessage"
+        );
+        if (window.KAITEN_CONFIG.OPEN_CARD_AFTER_CREATE) {
+          openInBrowser(url);
+        }
+        event.completed();
+      });
     })
     .catch(function (err) {
       if (console && console.error) console.error("[Kaiten Add-in]", err);
       notify(item, "kaiten-error", short(err && err.message ? err.message : String(err)), "errorMessage");
-    })
-    .then(function () {
-      // ExecuteFunction-команды обязаны вызывать event.completed().
       event.completed();
     });
 }
 
 /**
- * Основной сценарий создания карточки. Возвращает Promise с карточкой.
+ * Готовит список досок и показывает окно выбора.
+ * Возвращает Promise с { boardId, boardTitle } либо null (отмена).
  */
-function run(item) {
-  var token = window.KaitenSettings.getToken();
-  if (!token) {
-    return Promise.reject(
-      new Error("Не настроен токен. Открой «Настройки» в группе Kaiten на ленте.")
-    );
+function chooseBoard(defaultBoardId, defaultBoardTitle) {
+  return window.KaitenApi
+    .listBoards()
+    .catch(function () {
+      // Не удалось загрузить список — покажем окно только с доской по умолчанию.
+      return [];
+    })
+    .then(function (boards) {
+      var list = normalizeBoards(boards);
+      var payload = {
+        boards: list,
+        defaultBoardId: defaultBoardId,
+        defaultBoardTitle: defaultBoardTitle || "",
+      };
+      try {
+        window.localStorage.setItem("kaiten.boardChoice", JSON.stringify(payload));
+      } catch (e) {
+        /* нет localStorage — окно возьмёт дефолт из query-параметров */
+      }
+      return openBoardDialog(defaultBoardId, defaultBoardTitle);
+    });
+}
+
+// Приводит ответ listBoards к массиву { id, title }.
+function normalizeBoards(boards) {
+  var arr = Array.isArray(boards) ? boards : (boards && boards.data) || [];
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    out.push({ id: arr[i].id, title: arr[i].title || ("Доска #" + arr[i].id) });
   }
-  var boardId = window.KaitenSettings.getBoardId();
-  if (!boardId) {
-    return Promise.reject(
-      new Error("Не выбрана доска. Открой «Настройки» в группе Kaiten и выбери доску.")
+  return out;
+}
+
+// Открывает dialog.html через Office Dialog API. Резолвит выбор пользователя.
+function openBoardDialog(defaultBoardId, defaultBoardTitle) {
+  return new Promise(function (resolve, reject) {
+    if (!Office.context.ui || !Office.context.ui.displayDialogAsync) {
+      // Совсем старый клиент без Dialog API — создаём сразу на доске по умолчанию.
+      resolve({ boardId: defaultBoardId, boardTitle: defaultBoardTitle || "" });
+      return;
+    }
+
+    var url =
+      dialogUrl() +
+      "?defBoard=" +
+      encodeURIComponent(defaultBoardId) +
+      "&defTitle=" +
+      encodeURIComponent(defaultBoardTitle || "");
+
+    Office.context.ui.displayDialogAsync(
+      url,
+      { height: 48, width: 34, displayInIframe: false },
+      function (res) {
+        if (res.status !== Office.AsyncResultStatus.Succeeded) {
+          reject(new Error("Не удалось открыть окно выбора доски: " + (res.error && res.error.message)));
+          return;
+        }
+        var dialog = res.value;
+        var settled = false;
+
+        dialog.addEventHandler(Office.EventType.DialogMessageReceived, function (arg) {
+          var msg = null;
+          try { msg = JSON.parse(arg.message); } catch (e) { /* ignore */ }
+          settled = true;
+          dialog.close();
+          if (msg && msg.action === "confirm") {
+            resolve({ boardId: Number(msg.boardId) || 0, boardTitle: msg.boardTitle || "" });
+          } else {
+            resolve(null);
+          }
+        });
+
+        dialog.addEventHandler(Office.EventType.DialogEventReceived, function () {
+          // Пользователь закрыл окно крестиком и т.п. — считаем отменой.
+          if (!settled) resolve(null);
+        });
+      }
     );
+  });
+}
+
+// URL окна dialog.html рядом с commands.html (тот же каталог).
+function dialogUrl() {
+  return window.location.href.replace(/[^/]*$/, "dialog.html");
+}
+
+/**
+ * Основной сценарий создания карточки на заданной доске. Возвращает Promise с карточкой.
+ */
+function run(item, boardId) {
+  if (!boardId) {
+    return Promise.reject(new Error("Не выбрана доска для задачи."));
   }
 
   var card;

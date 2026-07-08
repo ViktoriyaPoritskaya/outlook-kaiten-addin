@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <title>Kaiten — выбор доски</title>
+    <script
+      type="text/javascript"
+      src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"
+    ></script>
+    <style>
+      :root {
+        --fg: #1f1f1f;
+        --muted: #666;
+        --border: #d8d8d8;
+        --accent: #2173eb;
+        --accent-hover: #155bbf;
+        --bg-soft: #f7f9fc;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 18px;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 14px;
+        color: var(--fg);
+        background: #fff;
+      }
+      h1 { font-size: 17px; margin: 0 0 10px 0; }
+      p { margin: 0 0 10px 0; line-height: 1.45; }
+      .note {
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin: 0 0 14px 0;
+        font-size: 13px;
+      }
+      label { display: block; font-weight: 600; margin: 0 0 5px 0; }
+      select {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-size: 14px;
+        font-family: inherit;
+      }
+      select:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+      .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0 0; }
+      .row { display: flex; gap: 10px; margin-top: 20px; }
+      .row > * { flex: 1; }
+      button {
+        cursor: pointer;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        padding: 10px 14px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-family: inherit;
+        font-weight: 600;
+      }
+      button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+      button.secondary { background: #fff; color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <h1>Создать задачу в Kaiten</h1>
+    <p class="note" id="default-note">Готовлю список досок…</p>
+
+    <label for="board">Доска для этой задачи</label>
+    <select id="board">
+      <option value="">— загрузка… —</option>
+    </select>
+    <p class="hint">По умолчанию подставлена сохранённая доска. Можно выбрать другую только для этого письма.</p>
+
+    <div class="row">
+      <button id="ok">Создать здесь</button>
+      <button id="cancel" class="secondary">Отмена</button>
+    </div>
+
+    <script>
+      // В диалоге доступны только messageParent и localStorage/URL — настройки
+      // (токен и т.п.) сюда не передаются. Список досок и доску по умолчанию
+      // готовит основной код и кладёт в localStorage; дубль дефолта — в URL.
+      var data = { boards: [], defaultBoardId: 0, defaultBoardTitle: "" };
+
+      try {
+        var raw = window.localStorage.getItem("kaiten.boardChoice");
+        if (raw) data = JSON.parse(raw) || data;
+      } catch (e) {
+        /* localStorage недоступен — возьмём дефолт из URL ниже */
+      }
+
+      // Подстраховка: дефолтная доска продублирована в query-параметрах.
+      var qDefId = Number(getParam("defBoard")) || 0;
+      var qDefTitle = getParam("defTitle");
+      if (qDefId) {
+        data.defaultBoardId = qDefId;
+        if (qDefTitle) data.defaultBoardTitle = qDefTitle;
+      }
+
+      Office.onReady(function () {
+        render();
+      });
+
+      function render() {
+        var sel = document.getElementById("board");
+        sel.innerHTML = "";
+
+        var boards = data.boards || [];
+        // Если списка нет (например, не удалось загрузить) — показываем хотя бы дефолт.
+        if (!boards.length && data.defaultBoardId) {
+          boards = [{
+            id: data.defaultBoardId,
+            title: data.defaultBoardTitle || ("Доска #" + data.defaultBoardId),
+          }];
+        }
+
+        for (var i = 0; i < boards.length; i++) {
+          var o = document.createElement("option");
+          o.value = String(boards[i].id);
+          o.text = boards[i].title + "  (id " + boards[i].id + ")";
+          if (Number(boards[i].id) === Number(data.defaultBoardId)) o.selected = true;
+          sel.appendChild(o);
+        }
+
+        var title = data.defaultBoardTitle || ("Доска #" + data.defaultBoardId);
+        document.getElementById("default-note").innerHTML =
+          "Доска по умолчанию: <b>" + escapeHtml(title) + "</b>.<br>" +
+          "Оставь её и нажми «Создать здесь» — или выбери другую в списке ниже.";
+      }
+
+      document.getElementById("ok").onclick = function () {
+        var sel = document.getElementById("board");
+        var boardId = sel.value;
+        var opt = sel.options[sel.selectedIndex];
+        var boardTitle = opt ? opt.text.replace(/\s+\(id \d+\)\s*$/, "") : "";
+        if (!boardId) {
+          send({ action: "cancel" });
+          return;
+        }
+        send({ action: "confirm", boardId: boardId, boardTitle: boardTitle });
+      };
+
+      document.getElementById("cancel").onclick = function () {
+        send({ action: "cancel" });
+      };
+
+      function send(obj) {
+        Office.context.ui.messageParent(JSON.stringify(obj));
+      }
+
+      function getParam(name) {
+        var m = new RegExp("[?&]" + name + "=([^&]*)").exec(window.location.search);
+        return m ? decodeURIComponent(m[1].replace(/\+/g, " ")) : "";
+      }
+
+      function escapeHtml(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c];
+        });
+      }
+    </script>
+  </body>
+</html>
