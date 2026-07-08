@@ -200,7 +200,7 @@ function run(item, boardId) {
 
       var payload = {
         board_id: boardId,
-        title: truncateLine(data.subject, 250),
+        title: buildTitle(data),
         description: description,
       };
 
@@ -316,6 +316,36 @@ function collectEmailData(item) {
       }
     });
   });
+}
+
+// Заголовок задачи: тема письма без префиксов пересылки/ответа (FW:, RE: и т.п.),
+// а если в теме/тексте найден код проекта вида «P_...» — ставим его в начало.
+function buildTitle(data) {
+  var subject = stripSubjectPrefixes(data.subject || "");
+  var code = findProjectCode((data.subject || "") + "\n" + (data.body || ""));
+  var title;
+  if (code) {
+    title = subject.indexOf(code) === 0 ? subject : (code + (subject ? " " + subject : ""));
+  } else {
+    title = subject || "(без темы)";
+  }
+  return truncateLine(title, 250);
+}
+
+// Убираем ведущие префиксы FW:/FWD:/RE: (в т.ч. русские) — возможно, несколько подряд.
+function stripSubjectPrefixes(s) {
+  var out = String(s || "");
+  var re = /^\s*(fw|fwd|re|пересл|ответ|отв)\s*(\[\d+\])?\s*:\s*/i;
+  while (re.test(out)) {
+    out = out.replace(re, "");
+  }
+  return out.replace(/^\s+/, "");
+}
+
+// Ищем код проекта вида «P_Test» (P_, затем буквы/цифры) в теме или тексте письма.
+function findProjectCode(text) {
+  var m = /P_[A-Za-z0-9А-Яа-яЁё]+/.exec(String(text || ""));
+  return m ? m[0] : "";
 }
 
 /**
