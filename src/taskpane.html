@@ -12,9 +12,19 @@
       type="text/javascript"
       src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"
     ></script>
-    <script type="text/javascript" src="config.js"></script>
-    <script type="text/javascript" src="settings.js"></script>
-    <script type="text/javascript" src="kaiten-api.js"></script>
+    <!-- Динамическая загрузка наших скриптов с меткой версии — обходит кэш IE (INetCache),
+         чтобы панель всегда работала на свежем коде. document.write сохраняет порядок. -->
+    <script type="text/javascript">
+      (function () {
+        var v = new Date().getTime();
+        var files = ["config.js", "settings.js", "kaiten-api.js"];
+        for (var i = 0; i < files.length; i++) {
+          document.write(
+            '<script type="text/javascript" src="' + files[i] + "?v=" + v + '"><\/script>'
+          );
+        }
+      })();
+    </script>
     <style>
       /* Без CSS-переменных: движок Outlook 2016 (IE11) их не поддерживает. */
       * {
