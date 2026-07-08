@@ -43,12 +43,16 @@ function createKaitenCard(event) {
       notify(item, "kaiten-info", "Создаю задачу в Kaiten…", "informationalMessage");
       return run(item, choice.boardId).then(function (card) {
         var url = window.KaitenApi.getCardUrl(card.id);
-        notify(
-          item,
-          "kaiten-info",
-          "Задача создана на доске «" + (choice.boardTitle || "?") + "»: #" + card.id,
-          "informationalMessage"
-        );
+        var msg = "Задача создана на доске «" + (choice.boardTitle || "?") + "»: #" + card.id;
+        var att = card.__attachments;
+        if (att) {
+          if (att.unsupported) {
+            msg += ". Вложения этот Outlook не отдаёт.";
+          } else if (att.total) {
+            msg += ". Вложений загружено: " + att.uploaded + "/" + att.total + ".";
+          }
+        }
+        notify(item, "kaiten-info", msg, "informationalMessage");
         if (window.KAITEN_CONFIG.OPEN_CARD_AFTER_CREATE) {
           openInBrowser(url);
         }
@@ -214,12 +218,16 @@ function run(item, boardId) {
       return null;
     })
     .then(function () {
-      // Загружаем сами файлы вложений в карточку (best effort).
-      return uploadAttachments(item, card.id).catch(function (e) {
-        if (console && console.warn) {
-          console.warn("[Kaiten Add-in] Не удалось загрузить вложения:", e);
-        }
-      });
+      // Загружаем сами файлы вложений в карточку (best effort). Сводку кладём на card.
+      return uploadAttachments(item, card.id)
+        .then(function (summary) {
+          card.__attachments = summary;
+        })
+        .catch(function (e) {
+          if (console && console.warn) {
+            console.warn("[Kaiten Add-in] Не удалось загрузить вложения:", e);
+          }
+        });
     })
     .then(function () {
       // Прикрепляем ссылку на исходное письмо как external link (best effort).
@@ -343,11 +351,12 @@ function supportsAttachmentContent(item) {
   }
 }
 
-// Загружает все файловые вложения письма в карточку. Best effort и последовательно,
-// чтобы не перегружать API. Если Outlook не поддерживает выгрузку — тихо пропускаем.
+// Загружает все файловые вложения письма в карточку. Best effort, последовательно.
+// Способ получения содержимого выбирается по возможностям Outlook:
+//   1) getAttachmentContentAsync (Mailbox 1.8) — современные клиенты;
+//   2) EWS makeEwsRequestAsync (с 1.5) — классический Outlook 2016 + Exchange on-prem.
+// Возвращает Promise со сводкой { uploaded, total, unsupported }.
 function uploadAttachments(item, cardId) {
-  if (!supportsAttachmentContent(item)) return Promise.resolve();
-
   var atts = [];
   var all = item.attachments || [];
   for (var i = 0; i < all.length; i++) {
@@ -355,24 +364,46 @@ function uploadAttachments(item, cardId) {
     // Берём только файлы (не вложенные письма/облачные ссылки).
     if (!a.attachmentType || a.attachmentType === "file") atts.push(a);
   }
-  if (!atts.length) return Promise.resolve();
+  if (!atts.length) return Promise.resolve({ uploaded: 0, total: 0 });
 
+  var getBase64;
+  if (supportsAttachmentContent(item)) {
+    getBase64 = function (att) { return getAttachmentContentB64(item, att); };
+  } else if (
+    Office.context.mailbox &&
+    typeof Office.context.mailbox.makeEwsRequestAsync === "function"
+  ) {
+    getBase64 = function (att) { return ewsGetAttachmentBase64(att.id); };
+  } else {
+    return Promise.resolve({ uploaded: 0, total: atts.length, unsupported: true });
+  }
+
+  var uploaded = 0;
   var chain = Promise.resolve();
   atts.forEach(function (att) {
     chain = chain.then(function () {
-      return getAttachmentBlob(item, att).then(function (blob) {
-        if (blob) {
-          return window.KaitenApi.uploadCardFile(cardId, blob, att.name || "attachment");
-        }
-        return null;
-      });
+      return getBase64(att)
+        .then(function (b64) {
+          if (!b64) return null;
+          var blob = base64ToBlob(b64, att.contentType);
+          return window.KaitenApi
+            .uploadCardFile(cardId, blob, att.name || "attachment")
+            .then(function () { uploaded++; });
+        })
+        .catch(function (e) {
+          if (console && console.warn) {
+            console.warn("[Kaiten Add-in] Вложение не загружено:", att.name, e);
+          }
+        });
     });
   });
-  return chain;
+  return chain.then(function () {
+    return { uploaded: uploaded, total: atts.length };
+  });
 }
 
-// Читает содержимое одного вложения и превращает его в Blob.
-function getAttachmentBlob(item, att) {
+// Способ 1: содержимое вложения через getAttachmentContentAsync (Base64).
+function getAttachmentContentB64(item, att) {
   return new Promise(function (resolve) {
     try {
       item.getAttachmentContentAsync(att.id, function (res) {
@@ -380,16 +411,9 @@ function getAttachmentBlob(item, att) {
           resolve(null);
           return;
         }
-        var content = res.value.content;
-        var format = res.value.format;
-        try {
-          if (format === Office.MailboxEnums.AttachmentContentFormat.Base64) {
-            resolve(base64ToBlob(content, att.contentType));
-          } else {
-            // Url/Eml/ICalendar как файл не грузим.
-            resolve(null);
-          }
-        } catch (e) {
+        if (res.value.format === Office.MailboxEnums.AttachmentContentFormat.Base64) {
+          resolve(res.value.content);
+        } else {
           resolve(null);
         }
       });
@@ -397,6 +421,47 @@ function getAttachmentBlob(item, att) {
       resolve(null);
     }
   });
+}
+
+// Способ 2: содержимое вложения через EWS GetAttachment (работает с Mailbox 1.5).
+function ewsGetAttachmentBase64(attId) {
+  return new Promise(function (resolve) {
+    try {
+      var soap = buildGetAttachmentSoap(attId);
+      Office.context.mailbox.makeEwsRequestAsync(soap, function (res) {
+        if (!res || res.status !== Office.AsyncResultStatus.Succeeded || !res.value) {
+          resolve(null);
+          return;
+        }
+        // Достаём base64 из <t:Content>…</t:Content> (префикс namespace может отличаться).
+        var m = /<(?:\w+:)?Content[^>]*>([\s\S]*?)<\/(?:\w+:)?Content>/.exec(res.value);
+        resolve(m ? m[1].replace(/\s+/g, "") : null);
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+function buildGetAttachmentSoap(attId) {
+  var id = String(attId || "").replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+  return (
+    '<?xml version="1.0" encoding="utf-8"?>' +
+    '<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' +
+    ' xmlns:xsd="http://www.w3.org/2001/XMLSchema"' +
+    ' xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"' +
+    ' xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">' +
+    "<soap:Header><t:RequestServerVersion Version=\"Exchange2013\"/></soap:Header>" +
+    "<soap:Body>" +
+    '<GetAttachment xmlns="http://schemas.microsoft.com/exchange/services/2006/messages"' +
+    ' xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">' +
+    "<AttachmentShape/>" +
+    "<AttachmentIds><t:AttachmentId Id=\"" + id + "\"/></AttachmentIds>" +
+    "</GetAttachment>" +
+    "</soap:Body></soap:Envelope>"
+  );
 }
 
 // Base64 → Blob (IE11 поддерживает atob, Uint8Array и Blob).
