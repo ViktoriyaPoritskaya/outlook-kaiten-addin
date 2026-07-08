@@ -232,6 +232,13 @@ function run(item, boardId) {
       return uploadAttachments(item, card.id)
         .then(function (summary) {
           card.__attachments = summary;
+          // Диагностика вложений — комментарием в карточку (надёжнее исчезающих уведомлений).
+          if (!summary || summary.uploaded !== summary.total || summary.unsupported) {
+            return window.KaitenApi
+              .addComment(card.id, buildAttachmentDiag(item, summary))
+              .catch(function () { /* диагностика — best effort */ });
+          }
+          return null;
         })
         .catch(function (e) {
           if (console && console.warn) {
@@ -418,6 +425,32 @@ function uploadAttachments(item, cardId) {
   return chain.then(function () {
     return { uploaded: uploaded, total: atts.length, method: method, lastError: lastError };
   });
+}
+
+// Диагностический текст для комментария в карточку (пока отлаживаем вложения).
+function buildAttachmentDiag(item, summary) {
+  var lines = ["Диагностика вложений (служебное):"];
+  var all = item.attachments || [];
+  lines.push("- всего в письме: " + all.length);
+  for (var i = 0; i < all.length; i++) {
+    var a = all[i];
+    lines.push(
+      "  • " + (a.name || "?") +
+      " [type=" + (a.attachmentType || "?") +
+      ", size=" + (a.size != null ? a.size : "?") +
+      ", inline=" + (a.isInline ? "да" : "нет") + "]"
+    );
+  }
+  if (summary) {
+    if (summary.unsupported) {
+      lines.push("- способ: недоступен (ни Mailbox 1.8, ни EWS)");
+    } else {
+      lines.push("- способ: " + (summary.method || "?"));
+      lines.push("- загружено: " + summary.uploaded + " из " + summary.total);
+      if (summary.lastError) lines.push("- причина: " + summary.lastError);
+    }
+  }
+  return lines.join("\n");
 }
 
 // Способ 1: содержимое вложения через getAttachmentContentAsync (Base64).

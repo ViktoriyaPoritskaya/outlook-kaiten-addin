@@ -176,6 +176,14 @@ window.KaitenApi = (function () {
   }
 
   /**
+   * Добавить комментарий к карточке.
+   * POST /api/latest/cards/{cardId}/comments
+   */
+  function addComment(cardId, text) {
+    return request("POST", "/api/latest/cards/" + cardId + "/comments", { text: text });
+  }
+
+  /**
    * Прикрепить готовый внешний URL к карточке (например, ссылку на письмо в Outlook).
    * POST /api/latest/cards/{cardId}/external-links
    */
@@ -200,6 +208,7 @@ window.KaitenApi = (function () {
     createCard: createCard,
     updateCard: updateCard,
     uploadCardFile: uploadCardFile,
+    addComment: addComment,
     addExternalLink: addExternalLink,
     getCardUrl: getCardUrl,
   };
