@@ -5,6 +5,10 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <title>Kaiten Add-in commands</title>
 
+    <!-- Полифилы Promise и fetch для IE11 (движок Outlook 2016). До office.js.
+         Лежат локально в vendor/. -->
+    <script type="text/javascript" src="vendor/promise-polyfill.min.js"></script>
+    <script type="text/javascript" src="vendor/fetch.umd.js"></script>
     <script
       type="text/javascript"
       src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"

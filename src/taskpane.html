@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <title>Kaiten — настройки</title>
+    <!-- Полифилы Promise и fetch: Outlook 2016 работает в IE11, где их нет.
+         Обязательно ДО office.js и наших скриптов. Лежат локально в vendor/. -->
+    <script type="text/javascript" src="vendor/promise-polyfill.min.js"></script>
+    <script type="text/javascript" src="vendor/fetch.umd.js"></script>
     <script
       type="text/javascript"
       src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"
@@ -153,11 +157,11 @@
     <p class="subtitle">Подключение к Kaiten</p>
 
     <label for="base-url">Адрес Kaiten</label>
-    <input id="base-url" type="text" placeholder="https://kaiten.almondtech.uz" autocomplete="off" />
+    <input id="base-url" type="text" placeholder="https://kaiten.example.com" autocomplete="off" />
     <p class="hint">Адрес вашего Kaiten без слэша на конце. <b>Не попадает в публичные файлы</b> — хранится в вашем профиле Outlook.</p>
 
     <label for="space-id-input">ID пространства</label>
-    <input id="space-id-input" type="text" placeholder="56" autocomplete="off" />
+    <input id="space-id-input" type="text" placeholder="" autocomplete="off" />
     <p class="hint">Из URL вашего Kaiten: /space/<b>ID</b>/boards. <b>Не попадает в публичные файлы.</b></p>
 
     <label for="token">API-токен Kaiten</label>
@@ -193,142 +197,134 @@
     </p>
 
     <script>
-      let officeReady = false;
+      // ES5-совместимый код: Outlook 2016 desktop работает в движке IE11,
+      // который не понимает стрелочные функции и async/await.
+      var officeReady = false;
 
-      Office.onReady(() => {
+      Office.onReady(function () {
         officeReady = true;
 
-        const settings = window.KaitenSettings;
+        var settings = window.KaitenSettings;
 
-        const savedBaseUrl = settings.getBaseUrl();
+        var savedBaseUrl = settings.getBaseUrl();
         if (savedBaseUrl) document.getElementById("base-url").value = savedBaseUrl;
 
-        const savedSpaceId = settings.getSpaceId();
+        var savedSpaceId = settings.getSpaceId();
         if (savedSpaceId) document.getElementById("space-id-input").value = String(savedSpaceId);
 
-        const token = settings.getToken();
+        var token = settings.getToken();
         if (token) document.getElementById("token").value = token;
 
-        const savedBoardId = settings.getBoardId();
-        const savedBoardTitle = settings.getBoardTitle();
+        var savedBoardId = settings.getBoardId();
+        var savedBoardTitle = settings.getBoardTitle();
         if (savedBoardId) {
-          const sel = document.getElementById("board");
-          const opt = document.createElement("option");
+          var sel = document.getElementById("board");
+          var opt = document.createElement("option");
           opt.value = String(savedBoardId);
-          opt.textContent = (savedBoardTitle || "Доска #" + savedBoardId) + " (сохранено)";
+          opt.text = (savedBoardTitle || "Доска #" + savedBoardId) + " (сохранено)";
           opt.selected = true;
           sel.appendChild(opt);
           sel.disabled = false;
         }
       });
 
-      document.getElementById("check").addEventListener("click", async () => {
+      document.getElementById("check").onclick = function () {
         if (!officeReady) return;
-        await stashConnectionFromInput();
-        await stashTokenFromInput();
-        setStatus("warn", "Проверяю токен…");
-        try {
-          const me = await window.KaitenApi.whoami();
-          setStatus(
-            "ok",
-            "Токен валиден. Авторизован как <b>" +
-              escapeHtml(me.full_name || me.username || me.email || "?") +
-              "</b>."
-          );
-        } catch (e) {
-          setStatus("err", "Не удалось проверить токен: " + escapeHtml(e.message));
-        }
-      });
+        saveInputs()
+          .then(function () {
+            setStatus("warn", "Проверяю токен…");
+            return window.KaitenApi.whoami();
+          })
+          .then(function (me) {
+            setStatus(
+              "ok",
+              "Токен валиден. Авторизован как <b>" +
+                escapeHtml(me.full_name || me.username || me.email || "?") +
+                "</b>."
+            );
+          })
+          .catch(function (e) {
+            setStatus("err", "Не удалось проверить токен: " + escapeHtml(e.message));
+          });
+      };
 
-      document.getElementById("load-boards").addEventListener("click", async () => {
+      document.getElementById("load-boards").onclick = function () {
         if (!officeReady) return;
-        await stashConnectionFromInput();
-        await stashTokenFromInput();
-        setStatus("warn", "Загружаю список досок…");
-        try {
-          const boards = await window.KaitenApi.listBoards();
-          fillBoards(boards);
-          setStatus("ok", "Загружено досок: " + boards.length + ". Выбери нужную и нажми «Сохранить».");
-        } catch (e) {
-          setStatus("err", "Не удалось загрузить доски: " + escapeHtml(e.message));
-        }
-      });
+        saveInputs()
+          .then(function () {
+            setStatus("warn", "Загружаю список досок…");
+            return window.KaitenApi.listBoards();
+          })
+          .then(function (boards) {
+            fillBoards(boards);
+            setStatus("ok", "Загружено досок: " + boards.length + ". Выбери нужную и нажми «Сохранить».");
+          })
+          .catch(function (e) {
+            setStatus("err", "Не удалось загрузить доски: " + escapeHtml(e.message));
+          });
+      };
 
-      document.getElementById("save").addEventListener("click", async () => {
+      document.getElementById("save").onclick = function () {
         if (!officeReady) return;
-        const settings = window.KaitenSettings;
-        await stashConnectionFromInput();
-        await stashTokenFromInput();
+        var settings = window.KaitenSettings;
 
-        const sel = document.getElementById("board");
-        const boardId = Number(sel.value) || 0;
-        const boardTitle = sel.options[sel.selectedIndex]
-          ? sel.options[sel.selectedIndex].textContent.replace(/ \(сохранено\)$/, "")
-          : "";
+        saveInputs()
+          .then(function () {
+            var sel = document.getElementById("board");
+            var boardId = Number(sel.value) || 0;
+            var boardTitle = sel.options[sel.selectedIndex]
+              ? sel.options[sel.selectedIndex].text.replace(/ \(сохранено\)$/, "")
+              : "";
 
-        if (!boardId) {
-          setStatus("err", "Сначала загрузи и выбери доску.");
-          return;
-        }
+            if (!boardId) {
+              setStatus("err", "Сначала загрузи и выбери доску.");
+              return null;
+            }
 
-        settings.setBoardId(boardId);
-        settings.setBoardTitle(boardTitle);
+            settings.setBoardId(boardId);
+            settings.setBoardTitle(boardTitle);
 
-        try {
-          await settings.save();
-          setStatus(
-            "ok",
-            "Сохранено. Теперь кнопка «Создать задачу» будет добавлять карточки на доску <b>" +
-              escapeHtml(boardTitle) +
-              "</b>."
-          );
-        } catch (e) {
-          setStatus("err", "Не удалось сохранить: " + escapeHtml(e.message));
-        }
-      });
+            return settings.save().then(function () {
+              setStatus(
+                "ok",
+                "Сохранено. Теперь кнопка «Создать задачу» будет добавлять карточки на доску <b>" +
+                  escapeHtml(boardTitle) +
+                  "</b>."
+              );
+            });
+          })
+          .catch(function (e) {
+            setStatus("err", "Не удалось сохранить: " + escapeHtml(e.message));
+          });
+      };
 
-      async function stashConnectionFromInput() {
-        const settings = window.KaitenSettings;
-        const baseUrl = document.getElementById("base-url").value.trim().replace(/\/+$/, "");
-        const spaceId = Number(document.getElementById("space-id-input").value.trim()) || 0;
-        let changed = false;
-        if (baseUrl && baseUrl !== settings.getBaseUrl()) {
-          settings.setBaseUrl(baseUrl);
-          changed = true;
-        }
-        if (spaceId && spaceId !== settings.getSpaceId()) {
-          settings.setSpaceId(spaceId);
-          changed = true;
-        }
-        if (changed) {
-          try { await settings.save(); } catch (e) { /* покажем при следующем действии */ }
-        }
-      }
+      // Считывает адрес/пространство/токен из полей и сохраняет их в профиль.
+      function saveInputs() {
+        var settings = window.KaitenSettings;
+        var baseUrl = trim(document.getElementById("base-url").value).replace(/\/+$/, "");
+        var spaceId = Number(trim(document.getElementById("space-id-input").value)) || 0;
+        var token = trim(document.getElementById("token").value);
 
-      async function stashTokenFromInput() {
-        const settings = window.KaitenSettings;
-        const value = document.getElementById("token").value.trim();
-        if (value && value !== settings.getToken()) {
-          settings.setToken(value);
-          try {
-            await settings.save();
-          } catch (e) {
-            /* покажем при следующем действии */
-          }
-        }
+        if (baseUrl) settings.setBaseUrl(baseUrl);
+        if (spaceId) settings.setSpaceId(spaceId);
+        if (token) settings.setToken(token);
+
+        return settings.save();
       }
 
       function fillBoards(boards) {
-        const sel = document.getElementById("board");
+        var sel = document.getElementById("board");
         sel.innerHTML = "";
-        const previouslySelected = window.KaitenSettings.getBoardId();
+        var previouslySelected = window.KaitenSettings.getBoardId();
         boards
           .slice()
-          .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
-          .forEach((b) => {
-            const opt = document.createElement("option");
+          .sort(function (a, b) {
+            return (a.title || "").localeCompare(b.title || "");
+          })
+          .forEach(function (b) {
+            var opt = document.createElement("option");
             opt.value = String(b.id);
-            opt.textContent = b.title + "  (id " + b.id + ")";
+            opt.text = b.title + "  (id " + b.id + ")";
             if (b.id === previouslySelected) opt.selected = true;
             sel.appendChild(opt);
           });
@@ -336,19 +332,25 @@
       }
 
       function setStatus(kind, htmlMsg) {
-        const el = document.getElementById("status");
+        var el = document.getElementById("status");
         el.className = kind;
         el.innerHTML = htmlMsg;
       }
 
+      function trim(s) {
+        return String(s == null ? "" : s).replace(/^\s+|\s+$/g, "");
+      }
+
       function escapeHtml(s) {
-        return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#39;",
-        })[c]);
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c];
+        });
       }
     </script>
   </body>

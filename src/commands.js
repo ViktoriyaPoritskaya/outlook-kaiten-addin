@@ -1,6 +1,9 @@
 /* global Office, window, console */
 
-Office.onReady(() => {
+// ВАЖНО: ES5-совместимый код (var, function, Promise-цепочки вместо async/await)
+// — Outlook 2016 desktop выполняет надстройку в движке IE11.
+
+Office.onReady(function () {
   if (typeof Office.actions !== "undefined" && Office.actions.associate) {
     Office.actions.associate("createKaitenCard", createKaitenCard);
   }
@@ -10,13 +13,13 @@ Office.onReady(() => {
  * Точка входа кнопки «Создать задачу» в группе Kaiten.
  */
 function createKaitenCard(event) {
-  const item = Office.context.mailbox.item;
+  var item = Office.context.mailbox.item;
 
   notify(item, "kaiten-info", "Создаю задачу в Kaiten…", "informationalMessage");
 
   run(item)
-    .then((card) => {
-      const url = window.KaitenApi.getCardUrl(card.id);
+    .then(function (card) {
+      var url = window.KaitenApi.getCardUrl(card.id);
       notify(item, "kaiten-info", "Задача создана: #" + card.id, "informationalMessage");
       if (window.KAITEN_CONFIG.OPEN_CARD_AFTER_CREATE) {
         try {
@@ -26,69 +29,90 @@ function createKaitenCard(event) {
         }
       }
     })
-    .catch((err) => {
-      console.error("[Kaiten Add-in]", err);
+    .catch(function (err) {
+      if (console && console.error) console.error("[Kaiten Add-in]", err);
       notify(item, "kaiten-error", short(err && err.message ? err.message : String(err)), "errorMessage");
     })
-    .then(() => {
+    .then(function () {
       // ExecuteFunction-команды обязаны вызывать event.completed().
       event.completed();
     });
 }
 
-async function run(item) {
-  // Проверяем наличие токена и выбранной доски.
-  const token = window.KaitenSettings.getToken();
+/**
+ * Основной сценарий создания карточки. Возвращает Promise с карточкой.
+ */
+function run(item) {
+  var token = window.KaitenSettings.getToken();
   if (!token) {
-    throw new Error(
-      "Не настроен токен. Открой «Настройки» в группе Kaiten на ленте."
+    return Promise.reject(
+      new Error("Не настроен токен. Открой «Настройки» в группе Kaiten на ленте.")
     );
   }
-  const boardId = window.KaitenSettings.getBoardId();
+  var boardId = window.KaitenSettings.getBoardId();
   if (!boardId) {
-    throw new Error(
-      "Не выбрана доска. Открой «Настройки» в группе Kaiten и выбери доску."
+    return Promise.reject(
+      new Error("Не выбрана доска. Открой «Настройки» в группе Kaiten и выбери доску.")
     );
   }
 
-  const data = await collectEmailData(item);
-  const description = buildDescription(data, window.KAITEN_CONFIG);
+  var card;
 
-  const payload = {
-    board_id: boardId,
-    title: truncateLine(data.subject, 250),
-    description: description,
-  };
+  return collectEmailData(item)
+    .then(function (data) {
+      var description = buildDescription(data, window.KAITEN_CONFIG);
 
-  const columnId = window.KaitenSettings.getDefaultColumnId();
-  if (columnId) payload.column_id = columnId;
+      var payload = {
+        board_id: boardId,
+        title: truncateLine(data.subject, 250),
+        description: description,
+      };
 
-  const card = await window.KaitenApi.createCard(payload);
+      var columnId = window.KaitenSettings.getDefaultColumnId();
+      if (columnId) payload.column_id = columnId;
 
-  // Прикрепляем ссылку на исходное письмо как external link, если получится получить.
-  try {
-    if (item.itemId && Office.context.mailbox.convertToRestId) {
-      const restId = Office.context.mailbox.convertToRestId(
-        item.itemId,
-        Office.MailboxEnums.RestVersion.v2_0
-      );
-      const link = "https://outlook.office.com/owa/?ItemID=" + encodeURIComponent(restId) + "&exvsurl=1&viewmodel=ReadMessageItem";
-      await window.KaitenApi.addExternalLink(card.id, link, "Исходное письмо в Outlook");
-    }
-  } catch (e) {
-    // External link — best effort, провал не критичен.
-    console.warn("[Kaiten Add-in] Не удалось добавить ссылку на письмо:", e);
-  }
+      return window.KaitenApi.createCard(payload);
+    })
+    .then(function (created) {
+      card = created;
 
-  return card;
+      // Прикрепляем ссылку на исходное письмо как external link (best effort).
+      try {
+        if (item.itemId && Office.context.mailbox.convertToRestId) {
+          var restId = Office.context.mailbox.convertToRestId(
+            item.itemId,
+            Office.MailboxEnums.RestVersion.v2_0
+          );
+          var link =
+            "https://outlook.office.com/owa/?ItemID=" +
+            encodeURIComponent(restId) +
+            "&exvsurl=1&viewmodel=ReadMessageItem";
+          return window.KaitenApi
+            .addExternalLink(card.id, link, "Исходное письмо в Outlook")
+            .catch(function (e) {
+              if (console && console.warn) {
+                console.warn("[Kaiten Add-in] Не удалось добавить ссылку на письмо:", e);
+              }
+            });
+        }
+      } catch (e) {
+        if (console && console.warn) {
+          console.warn("[Kaiten Add-in] Не удалось добавить ссылку на письмо:", e);
+        }
+      }
+      return null;
+    })
+    .then(function () {
+      return card;
+    });
 }
 
 /**
  * Собирает данные из открытого письма (тело — асинхронно).
  */
 function collectEmailData(item) {
-  return new Promise((resolve, reject) => {
-    const data = {
+  return new Promise(function (resolve, reject) {
+    var data = {
       subject: item.subject || "(без темы)",
       senderName: "",
       senderEmail: "",
@@ -97,20 +121,22 @@ function collectEmailData(item) {
       receivedDate: item.dateTimeCreated ? new Date(item.dateTimeCreated) : null,
     };
 
-    const sender = item.from || item.sender;
+    var sender = item.from || item.sender;
     if (sender) {
       data.senderName = sender.displayName || "";
       data.senderEmail = sender.emailAddress || "";
     }
 
     if (Array.isArray(item.attachments)) {
-      data.attachments = item.attachments.map((a) => ({
-        name: a.name || "(без имени)",
-        size: typeof a.size === "number" ? a.size : null,
-      }));
+      data.attachments = item.attachments.map(function (a) {
+        return {
+          name: a.name || "(без имени)",
+          size: typeof a.size === "number" ? a.size : null,
+        };
+      });
     }
 
-    item.body.getAsync(Office.CoercionType.Text, (result) => {
+    item.body.getAsync(Office.CoercionType.Text, function (result) {
       if (result.status === Office.AsyncResultStatus.Succeeded) {
         data.body = result.value || "";
         resolve(data);
@@ -125,10 +151,10 @@ function collectEmailData(item) {
  * Markdown-описание для карточки Kaiten (Kaiten поддерживает Markdown в описании).
  */
 function buildDescription(data, cfg) {
-  const lines = [];
+  var lines = [];
 
   if (cfg.INCLUDE_SENDER_IN_DESCRIPTION && (data.senderName || data.senderEmail)) {
-    const sender = data.senderName
+    var sender = data.senderName
       ? data.senderName + (data.senderEmail ? " <" + data.senderEmail + ">" : "")
       : data.senderEmail;
     lines.push("**От:** " + sender);
@@ -140,7 +166,7 @@ function buildDescription(data, cfg) {
 
   if (cfg.INCLUDE_ATTACHMENTS_IN_DESCRIPTION && data.attachments.length > 0) {
     lines.push("**Вложения:**");
-    data.attachments.forEach((a) => {
+    data.attachments.forEach(function (a) {
       lines.push(
         "- " + a.name + (a.size != null ? " _(" + formatBytes(a.size) + ")_" : "")
       );
@@ -179,18 +205,22 @@ function formatBytes(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
+function pad2(n) {
+  n = String(n);
+  return n.length < 2 ? "0" + n : n;
+}
+
 function formatDate(d) {
-  const pad = (n) => String(n).padStart(2, "0");
   return (
-    pad(d.getDate()) +
+    pad2(d.getDate()) +
     "." +
-    pad(d.getMonth() + 1) +
+    pad2(d.getMonth() + 1) +
     "." +
     d.getFullYear() +
     " " +
-    pad(d.getHours()) +
+    pad2(d.getHours()) +
     ":" +
-    pad(d.getMinutes())
+    pad2(d.getMinutes())
   );
 }
 
