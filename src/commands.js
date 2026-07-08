@@ -371,8 +371,8 @@ function supportsAttachmentContent(item) {
 // Загружает все файловые вложения письма в карточку. Best effort, последовательно.
 // Способ получения содержимого выбирается по возможностям Outlook:
 //   1) getAttachmentContentAsync (Mailbox 1.8) — современные клиенты;
-//   2) EWS makeEwsRequestAsync (с 1.5) — классический Outlook 2016 + Exchange on-prem.
-// Возвращает Promise со сводкой { uploaded, total, unsupported }.
+//   2) Outlook REST API (getCallbackTokenAsync, с 1.5) — классический Outlook 2016.
+// Возвращает Promise со сводкой { uploaded, total, method, lastError, unsupported }.
 function uploadAttachments(item, cardId) {
   var atts = [];
   var all = item.attachments || [];
@@ -383,48 +383,52 @@ function uploadAttachments(item, cardId) {
   }
   if (!atts.length) return Promise.resolve({ uploaded: 0, total: 0 });
 
-  var getBase64;
   var method;
+  var collector;
   if (supportsAttachmentContent(item)) {
     method = "1.8";
-    getBase64 = function (att) { return getAttachmentContentB64(item, att); };
-  } else if (
-    Office.context.mailbox &&
-    typeof Office.context.mailbox.makeEwsRequestAsync === "function"
-  ) {
-    method = "EWS";
-    getBase64 = function (att) { return ewsGetAttachmentBase64(att.id); };
+    collector = collectVia18(item, atts);
+  } else if (canUseRest(item)) {
+    method = "REST";
+    collector = collectViaRest(item);
   } else {
     return Promise.resolve({ uploaded: 0, total: atts.length, unsupported: true });
   }
 
-  var uploaded = 0;
-  var lastError = "";
-  var chain = Promise.resolve();
-  atts.forEach(function (att) {
-    chain = chain.then(function () {
-      return getBase64(att)
-        .then(function (r) {
-          var b64 = r && r.content;
-          if (!b64) {
-            lastError = (r && r.debug) ? r.debug : "нет содержимого (" + method + ")";
-            return null;
-          }
-          var blob = base64ToBlob(b64, att.contentType);
-          return window.KaitenApi
-            .uploadCardFile(cardId, blob, att.name || "attachment")
-            .then(function () { uploaded++; });
-        })
-        .catch(function (e) {
-          lastError = (e && e.message) ? e.message : String(e);
-          if (console && console.warn) {
-            console.warn("[Kaiten Add-in] Вложение не загружено:", att.name, e);
-          }
-        });
+  return collector.then(function (res) {
+    if (res.error) {
+      return { uploaded: 0, total: atts.length, method: method, lastError: res.error };
+    }
+    var files = res.files || [];
+    var uploaded = 0;
+    var lastError = "";
+    var chain = Promise.resolve();
+    files.forEach(function (f) {
+      chain = chain.then(function () {
+        if (!f.base64) {
+          lastError = "нет содержимого: " + (f.name || "?");
+          return null;
+        }
+        var blob = base64ToBlob(f.base64, f.contentType);
+        return window.KaitenApi
+          .uploadCardFile(cardId, blob, f.name || "attachment")
+          .then(function () { uploaded++; })
+          .catch(function (e) {
+            lastError = (e && e.message) ? e.message : String(e);
+            if (console && console.warn) {
+              console.warn("[Kaiten Add-in] Вложение не загружено:", f.name, e);
+            }
+          });
+      });
     });
-  });
-  return chain.then(function () {
-    return { uploaded: uploaded, total: atts.length, method: method, lastError: lastError };
+    return chain.then(function () {
+      return {
+        uploaded: uploaded,
+        total: files.length || atts.length,
+        method: method,
+        lastError: lastError,
+      };
+    });
   });
 }
 
@@ -444,7 +448,7 @@ function buildAttachmentDiag(item, summary) {
   }
   if (summary) {
     if (summary.unsupported) {
-      lines.push("- способ: недоступен (ни Mailbox 1.8, ни EWS)");
+      lines.push("- способ: недоступен (ни Mailbox 1.8, ни REST)");
     } else {
       lines.push("- способ: " + (summary.method || "?"));
       lines.push("- загружено: " + summary.uploaded + " из " + summary.total);
@@ -454,76 +458,110 @@ function buildAttachmentDiag(item, summary) {
   return lines.join("\n");
 }
 
-// Способ 1: содержимое вложения через getAttachmentContentAsync (Base64).
-// Возвращает { content, debug }.
-function getAttachmentContentB64(item, att) {
-  return new Promise(function (resolve) {
-    try {
-      item.getAttachmentContentAsync(att.id, function (res) {
-        if (!res || res.status !== Office.AsyncResultStatus.Succeeded || !res.value) {
-          resolve({ content: null, debug: "1.8 status=" + (res && res.status) + " err=" + (res && res.error && res.error.message) });
-          return;
-        }
-        if (res.value.format === Office.MailboxEnums.AttachmentContentFormat.Base64) {
-          resolve({ content: res.value.content, debug: "" });
-        } else {
-          resolve({ content: null, debug: "1.8 format=" + res.value.format });
+// Способ 1: собрать файлы через getAttachmentContentAsync (Mailbox 1.8).
+// Возвращает { files:[{name,contentType,base64}], error }.
+function collectVia18(item, atts) {
+  var files = [];
+  var lastErr = "";
+  var chain = Promise.resolve();
+  atts.forEach(function (att) {
+    chain = chain.then(function () {
+      return new Promise(function (resolve) {
+        try {
+          item.getAttachmentContentAsync(att.id, function (res) {
+            if (
+              res && res.status === Office.AsyncResultStatus.Succeeded && res.value &&
+              res.value.format === Office.MailboxEnums.AttachmentContentFormat.Base64
+            ) {
+              files.push({ name: att.name, contentType: att.contentType, base64: res.value.content });
+            } else {
+              lastErr = "1.8 status=" + (res && res.status) +
+                (res && res.value ? " format=" + res.value.format : "");
+            }
+            resolve();
+          });
+        } catch (e) {
+          lastErr = "1.8 exception: " + (e && e.message);
+          resolve();
         }
       });
-    } catch (e) {
-      resolve({ content: null, debug: "1.8 exception: " + (e && e.message) });
-    }
+    });
+  });
+  return chain.then(function () {
+    return { files: files, error: files.length ? "" : lastErr };
   });
 }
 
-// Способ 2: содержимое вложения через EWS GetAttachment (работает с Mailbox 1.5).
-// Возвращает { content, debug } — при неудаче в debug статус/кусок ответа сервера.
-function ewsGetAttachmentBase64(attId) {
-  return new Promise(function (resolve) {
-    try {
-      var soap = buildGetAttachmentSoap(attId);
-      Office.context.mailbox.makeEwsRequestAsync(soap, function (res) {
-        if (!res || res.status !== Office.AsyncResultStatus.Succeeded) {
-          resolve({ content: null, debug: "EWS status=" + (res && res.status) + " err=" + (res && res.error && res.error.message) });
-          return;
-        }
-        var body = res.value || "";
-        var m = /<(?:\w+:)?Content[^>]*>([\s\S]*?)<\/(?:\w+:)?Content>/.exec(body);
-        if (m) {
-          resolve({ content: m[1].replace(/\s+/g, ""), debug: "" });
-          return;
-        }
-        // Нет Content — вытащим текст ошибки/фолта или начало ответа.
-        var codeM = /<(?:\w+:)?ResponseCode>([\s\S]*?)<\/(?:\w+:)?ResponseCode>/.exec(body);
-        var faultM = /<(?:\w+:)?(?:faultstring|MessageText)[^>]*>([\s\S]*?)<\//.exec(body);
-        var info = codeM ? codeM[1] : (faultM ? faultM[1] : body.substring(0, 160));
-        resolve({ content: null, debug: "EWS без Content: " + info });
-      });
-    } catch (e) {
-      resolve({ content: null, debug: "EWS exception: " + (e && e.message) });
-    }
-  });
+// Доступен ли путь через Outlook REST API.
+function canUseRest(item) {
+  try {
+    return !!(
+      item.itemId &&
+      Office.context.mailbox.getCallbackTokenAsync &&
+      Office.context.mailbox.convertToRestId
+    );
+  } catch (e) {
+    return false;
+  }
 }
 
-function buildGetAttachmentSoap(attId) {
-  var id = String(attId || "").replace(/[&<>"]/g, function (c) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+// Способ 2: собрать файлы через Outlook REST API (/messages/{id}/attachments).
+// Возвращает { files:[{name,contentType,base64}], error }.
+function collectViaRest(item) {
+  return new Promise(function (resolve) {
+    try {
+      Office.context.mailbox.getCallbackTokenAsync({ isRest: true }, function (tr) {
+        if (!tr || tr.status !== Office.AsyncResultStatus.Succeeded) {
+          resolve({ error: "REST токен: " + (tr && tr.error && tr.error.message) });
+          return;
+        }
+        var token = tr.value;
+        var restUrl = Office.context.mailbox.restUrl || "https://outlook.office365.com";
+        var restId = Office.context.mailbox.convertToRestId(
+          item.itemId,
+          Office.MailboxEnums.RestVersion.v2_0
+        );
+        var url = restUrl + "/api/v2.0/me/messages/" + encodeURIComponent(restId) + "/attachments";
+
+        fetch(url, {
+          headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+        })
+          .then(function (resp) {
+            return resp.text().then(function (t) {
+              return { ok: resp.ok, status: resp.status, text: t };
+            });
+          })
+          .then(function (r) {
+            if (!r.ok) {
+              resolve({ error: "REST " + r.status + ": " + (r.text || "").substring(0, 140) });
+              return;
+            }
+            var data;
+            try {
+              data = JSON.parse(r.text);
+            } catch (e) {
+              resolve({ error: "REST parse error" });
+              return;
+            }
+            var arr = data.value || [];
+            var files = [];
+            for (var i = 0; i < arr.length; i++) {
+              var a = arr[i];
+              // fileAttachment содержит ContentBytes (base64). itemAttachment пропускаем.
+              if (a.ContentBytes) {
+                files.push({ name: a.Name, contentType: a.ContentType, base64: a.ContentBytes });
+              }
+            }
+            resolve({ files: files });
+          })
+          .catch(function (e) {
+            resolve({ error: "REST fetch: " + ((e && e.message) || e) });
+          });
+      });
+    } catch (e) {
+      resolve({ error: "REST exception: " + ((e && e.message) || e) });
+    }
   });
-  return (
-    '<?xml version="1.0" encoding="utf-8"?>' +
-    '<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' +
-    ' xmlns:xsd="http://www.w3.org/2001/XMLSchema"' +
-    ' xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"' +
-    ' xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">' +
-    "<soap:Header><t:RequestServerVersion Version=\"Exchange2013\"/></soap:Header>" +
-    "<soap:Body>" +
-    '<GetAttachment xmlns="http://schemas.microsoft.com/exchange/services/2006/messages"' +
-    ' xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">' +
-    "<AttachmentShape/>" +
-    "<AttachmentIds><t:AttachmentId Id=\"" + id + "\"/></AttachmentIds>" +
-    "</GetAttachment>" +
-    "</soap:Body></soap:Envelope>"
-  );
 }
 
 // Base64 → Blob (IE11 поддерживает atob, Uint8Array и Blob).
