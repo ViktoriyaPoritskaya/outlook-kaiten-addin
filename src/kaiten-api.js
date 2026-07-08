@@ -112,6 +112,15 @@ window.KaitenApi = (function () {
   }
 
   /**
+   * Список кастомных свойств (полей) компании.
+   * Нужен, чтобы по имени поля («Заказчик») найти его id для payload карточки.
+   * GET /api/latest/company/custom-properties
+   */
+  function listCustomProperties() {
+    return request("GET", "/api/latest/company/custom-properties");
+  }
+
+  /**
    * Создать карточку.
    * POST /api/latest/cards
    * Минимально нужен board_id и title.
@@ -141,6 +150,7 @@ window.KaitenApi = (function () {
   return {
     listBoards: listBoards,
     whoami: whoami,
+    listCustomProperties: listCustomProperties,
     createCard: createCard,
     addExternalLink: addExternalLink,
     getCardUrl: getCardUrl,

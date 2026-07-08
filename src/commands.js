@@ -22,11 +22,7 @@ function createKaitenCard(event) {
       var url = window.KaitenApi.getCardUrl(card.id);
       notify(item, "kaiten-info", "Задача создана: #" + card.id, "informationalMessage");
       if (window.KAITEN_CONFIG.OPEN_CARD_AFTER_CREATE) {
-        try {
-          window.open(url, "_blank");
-        } catch (e) {
-          /* noop */
-        }
+        openInBrowser(url);
       }
     })
     .catch(function (err) {
@@ -57,9 +53,18 @@ function run(item) {
   }
 
   var card;
+  var data;
 
   return collectEmailData(item)
-    .then(function (data) {
+    .then(function (collected) {
+      data = collected;
+      // Список кастомных полей нужен, чтобы найти id поля «Заказчик».
+      // Best effort: если не получится — создадим карточку без этого поля.
+      return window.KaitenApi.listCustomProperties().catch(function () {
+        return [];
+      });
+    })
+    .then(function (props) {
       var description = buildDescription(data, window.KAITEN_CONFIG);
 
       var payload = {
@@ -70,6 +75,15 @@ function run(item) {
 
       var columnId = window.KaitenSettings.getDefaultColumnId();
       if (columnId) payload.column_id = columnId;
+
+      // Заполняем текстовое поле «Заказчик» отправителем письма.
+      var list = normalizeProps(props);
+      var propId = findPropertyId(list, customerFieldName());
+      var customerValue = formatSender(data);
+      if (propId && customerValue) {
+        payload.properties = {};
+        payload.properties["id_" + propId] = customerValue;
+      }
 
       return window.KaitenApi.createCard(payload);
     })
@@ -182,6 +196,56 @@ function buildDescription(data, cfg) {
   lines.push(truncate(data.body, cfg.MAX_BODY_LENGTH));
 
   return lines.join("\n");
+}
+
+// Имя кастомного поля Kaiten, куда пишем отправителя. Можно переопределить
+// в config.js через CUSTOMER_FIELD_NAME, по умолчанию — «Заказчик».
+function customerFieldName() {
+  return (window.KAITEN_CONFIG && window.KAITEN_CONFIG.CUSTOMER_FIELD_NAME) || "Заказчик";
+}
+
+// Ответ /company/custom-properties может прийти массивом или объектом с .data.
+function normalizeProps(props) {
+  if (Array.isArray(props)) return props;
+  if (props && Array.isArray(props.data)) return props.data;
+  return [];
+}
+
+// Находит id кастомного свойства по его названию (без учёта регистра/пробелов).
+function findPropertyId(list, name) {
+  var target = String(name || "").toLowerCase().replace(/^\s+|\s+$/g, "");
+  for (var i = 0; i < list.length; i++) {
+    var n = String(list[i].name || "").toLowerCase().replace(/^\s+|\s+$/g, "");
+    if (n === target) return list[i].id;
+  }
+  return null;
+}
+
+// Строка отправителя письма: «Имя <email>», либо что есть.
+function formatSender(data) {
+  if (data.senderName && data.senderEmail) {
+    return data.senderName + " <" + data.senderEmail + ">";
+  }
+  return data.senderName || data.senderEmail || "";
+}
+
+// Открывает URL карточки в браузере по умолчанию.
+// Веб-надстройка не может выбрать конкретный браузер (Chrome и т.п.) — открывается
+// системный браузер по умолчанию. openBrowserWindow предпочтительнее window.open.
+function openInBrowser(url) {
+  try {
+    if (Office.context && Office.context.ui && Office.context.ui.openBrowserWindow) {
+      Office.context.ui.openBrowserWindow(url);
+      return;
+    }
+  } catch (e) {
+    /* fallback ниже */
+  }
+  try {
+    window.open(url, "_blank");
+  } catch (e2) {
+    /* noop */
+  }
 }
 
 function truncate(str, max) {
