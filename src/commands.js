@@ -54,17 +54,22 @@ function run(item) {
 
   var card;
   var data;
+  var customerPropId = null;
+  var customerValue = "";
 
   return collectEmailData(item)
     .then(function (collected) {
       data = collected;
+      customerValue = formatSender(data);
       // Список кастомных полей нужен, чтобы найти id поля «Заказчик».
-      // Best effort: если не получится — создадим карточку без этого поля.
+      // Best effort: если не получится — просто не заполним это поле.
       return window.KaitenApi.listCustomProperties().catch(function () {
         return [];
       });
     })
     .then(function (props) {
+      customerPropId = findPropertyId(normalizeProps(props), customerFieldName());
+
       var description = buildDescription(data, window.KAITEN_CONFIG);
 
       var payload = {
@@ -76,20 +81,27 @@ function run(item) {
       var columnId = window.KaitenSettings.getDefaultColumnId();
       if (columnId) payload.column_id = columnId;
 
-      // Заполняем текстовое поле «Заказчик» отправителем письма.
-      var list = normalizeProps(props);
-      var propId = findPropertyId(list, customerFieldName());
-      var customerValue = formatSender(data);
-      if (propId && customerValue) {
-        payload.properties = {};
-        payload.properties["id_" + propId] = customerValue;
-      }
-
       return window.KaitenApi.createCard(payload);
     })
     .then(function (created) {
       card = created;
 
+      // Дописываем поле «Заказчик» отдельным запросом. Best effort: если не выйдет —
+      // карточка уже создана, ошибку только залогируем, но не роняем весь сценарий.
+      if (customerPropId && customerValue) {
+        var props = {};
+        props["id_" + customerPropId] = customerValue;
+        return window.KaitenApi
+          .updateCard(card.id, { properties: props })
+          .catch(function (e) {
+            if (console && console.warn) {
+              console.warn("[Kaiten Add-in] Не удалось заполнить поле «Заказчик»:", e);
+            }
+          });
+      }
+      return null;
+    })
+    .then(function () {
       // Прикрепляем ссылку на исходное письмо как external link (best effort).
       try {
         if (item.itemId && Office.context.mailbox.convertToRestId) {

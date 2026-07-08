@@ -130,6 +130,14 @@ window.KaitenApi = (function () {
   }
 
   /**
+   * Обновить карточку (используем для проставления кастомных полей после создания).
+   * PATCH /api/latest/cards/{cardId}
+   */
+  function updateCard(cardId, payload) {
+    return request("PATCH", "/api/latest/cards/" + cardId, payload);
+  }
+
+  /**
    * Прикрепить готовый внешний URL к карточке (например, ссылку на письмо в Outlook).
    * POST /api/latest/cards/{cardId}/external-links
    */
@@ -152,6 +160,7 @@ window.KaitenApi = (function () {
     whoami: whoami,
     listCustomProperties: listCustomProperties,
     createCard: createCard,
+    updateCard: updateCard,
     addExternalLink: addExternalLink,
     getCardUrl: getCardUrl,
   };
