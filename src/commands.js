@@ -43,16 +43,26 @@ function createKaitenCard(event) {
       notify(item, "kaiten-info", "Создаю задачу в Kaiten…", "informationalMessage");
       return run(item, choice.boardId).then(function (card) {
         var url = window.KaitenApi.getCardUrl(card.id);
-        var msg = "Задача создана на доске «" + (choice.boardTitle || "?") + "»: #" + card.id;
+        notify(item, "kaiten-info", "Задача создана: #" + card.id, "informationalMessage");
+
+        // Статус вложений — отдельным уведомлением, чтобы не обрезался лимитом длины.
         var att = card.__attachments;
         if (att) {
           if (att.unsupported) {
-            msg += ". Вложения этот Outlook не отдаёт.";
+            notify(item, "kaiten-att", "Вложения: этот Outlook не отдаёт файлы (нет ни API 1.8, ни EWS).", "informationalMessage");
           } else if (att.total) {
-            msg += ". Вложений загружено: " + att.uploaded + "/" + att.total + ".";
+            var attMsg = "Вложения (" + att.method + "): загружено " + att.uploaded + " из " + att.total + ".";
+            if (att.uploaded !== att.total && att.lastError) {
+              attMsg += " Причина: " + att.lastError;
+            }
+            notify(
+              item,
+              "kaiten-att",
+              attMsg,
+              att.uploaded === att.total ? "informationalMessage" : "errorMessage"
+            );
           }
         }
-        notify(item, "kaiten-info", msg, "informationalMessage");
         if (window.KAITEN_CONFIG.OPEN_CARD_AFTER_CREATE) {
           openInBrowser(url);
         }
@@ -367,30 +377,38 @@ function uploadAttachments(item, cardId) {
   if (!atts.length) return Promise.resolve({ uploaded: 0, total: 0 });
 
   var getBase64;
+  var method;
   if (supportsAttachmentContent(item)) {
+    method = "1.8";
     getBase64 = function (att) { return getAttachmentContentB64(item, att); };
   } else if (
     Office.context.mailbox &&
     typeof Office.context.mailbox.makeEwsRequestAsync === "function"
   ) {
+    method = "EWS";
     getBase64 = function (att) { return ewsGetAttachmentBase64(att.id); };
   } else {
     return Promise.resolve({ uploaded: 0, total: atts.length, unsupported: true });
   }
 
   var uploaded = 0;
+  var lastError = "";
   var chain = Promise.resolve();
   atts.forEach(function (att) {
     chain = chain.then(function () {
       return getBase64(att)
         .then(function (b64) {
-          if (!b64) return null;
+          if (!b64) {
+            lastError = "нет содержимого (" + method + ")";
+            return null;
+          }
           var blob = base64ToBlob(b64, att.contentType);
           return window.KaitenApi
             .uploadCardFile(cardId, blob, att.name || "attachment")
             .then(function () { uploaded++; });
         })
         .catch(function (e) {
+          lastError = (e && e.message) ? e.message : String(e);
           if (console && console.warn) {
             console.warn("[Kaiten Add-in] Вложение не загружено:", att.name, e);
           }
@@ -398,7 +416,7 @@ function uploadAttachments(item, cardId) {
     });
   });
   return chain.then(function () {
-    return { uploaded: uploaded, total: atts.length };
+    return { uploaded: uploaded, total: atts.length, method: method, lastError: lastError };
   });
 }
 
