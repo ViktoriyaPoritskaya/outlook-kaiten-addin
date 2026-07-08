@@ -404,9 +404,10 @@ function uploadAttachments(item, cardId) {
   atts.forEach(function (att) {
     chain = chain.then(function () {
       return getBase64(att)
-        .then(function (b64) {
+        .then(function (r) {
+          var b64 = r && r.content;
           if (!b64) {
-            lastError = "нет содержимого (" + method + ")";
+            lastError = (r && r.debug) ? r.debug : "нет содержимого (" + method + ")";
             return null;
           }
           var blob = base64ToBlob(b64, att.contentType);
@@ -454,42 +455,52 @@ function buildAttachmentDiag(item, summary) {
 }
 
 // Способ 1: содержимое вложения через getAttachmentContentAsync (Base64).
+// Возвращает { content, debug }.
 function getAttachmentContentB64(item, att) {
   return new Promise(function (resolve) {
     try {
       item.getAttachmentContentAsync(att.id, function (res) {
         if (!res || res.status !== Office.AsyncResultStatus.Succeeded || !res.value) {
-          resolve(null);
+          resolve({ content: null, debug: "1.8 status=" + (res && res.status) + " err=" + (res && res.error && res.error.message) });
           return;
         }
         if (res.value.format === Office.MailboxEnums.AttachmentContentFormat.Base64) {
-          resolve(res.value.content);
+          resolve({ content: res.value.content, debug: "" });
         } else {
-          resolve(null);
+          resolve({ content: null, debug: "1.8 format=" + res.value.format });
         }
       });
     } catch (e) {
-      resolve(null);
+      resolve({ content: null, debug: "1.8 exception: " + (e && e.message) });
     }
   });
 }
 
 // Способ 2: содержимое вложения через EWS GetAttachment (работает с Mailbox 1.5).
+// Возвращает { content, debug } — при неудаче в debug статус/кусок ответа сервера.
 function ewsGetAttachmentBase64(attId) {
   return new Promise(function (resolve) {
     try {
       var soap = buildGetAttachmentSoap(attId);
       Office.context.mailbox.makeEwsRequestAsync(soap, function (res) {
-        if (!res || res.status !== Office.AsyncResultStatus.Succeeded || !res.value) {
-          resolve(null);
+        if (!res || res.status !== Office.AsyncResultStatus.Succeeded) {
+          resolve({ content: null, debug: "EWS status=" + (res && res.status) + " err=" + (res && res.error && res.error.message) });
           return;
         }
-        // Достаём base64 из <t:Content>…</t:Content> (префикс namespace может отличаться).
-        var m = /<(?:\w+:)?Content[^>]*>([\s\S]*?)<\/(?:\w+:)?Content>/.exec(res.value);
-        resolve(m ? m[1].replace(/\s+/g, "") : null);
+        var body = res.value || "";
+        var m = /<(?:\w+:)?Content[^>]*>([\s\S]*?)<\/(?:\w+:)?Content>/.exec(body);
+        if (m) {
+          resolve({ content: m[1].replace(/\s+/g, ""), debug: "" });
+          return;
+        }
+        // Нет Content — вытащим текст ошибки/фолта или начало ответа.
+        var codeM = /<(?:\w+:)?ResponseCode>([\s\S]*?)<\/(?:\w+:)?ResponseCode>/.exec(body);
+        var faultM = /<(?:\w+:)?(?:faultstring|MessageText)[^>]*>([\s\S]*?)<\//.exec(body);
+        var info = codeM ? codeM[1] : (faultM ? faultM[1] : body.substring(0, 160));
+        resolve({ content: null, debug: "EWS без Content: " + info });
       });
     } catch (e) {
-      resolve(null);
+      resolve({ content: null, debug: "EWS exception: " + (e && e.message) });
     }
   });
 }
