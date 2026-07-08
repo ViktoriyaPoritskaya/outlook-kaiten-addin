@@ -369,9 +369,10 @@ function supportsAttachmentContent(item) {
 }
 
 // Загружает все файловые вложения письма в карточку. Best effort, последовательно.
-// Способ получения содержимого выбирается по возможностям Outlook:
+// Способы пробуются по очереди, пока какой-то не отдаст содержимое:
 //   1) getAttachmentContentAsync (Mailbox 1.8) — современные клиенты;
-//   2) Outlook REST API (getCallbackTokenAsync, с 1.5) — классический Outlook 2016.
+//   2) Outlook REST API (getCallbackTokenAsync, с 1.5);
+//   3) EWS GetItem + MimeContent (с 1.5) — разбор письма в MIME на месте.
 // Возвращает Promise со сводкой { uploaded, total, method, lastError, unsupported }.
 function uploadAttachments(item, cardId) {
   var atts = [];
@@ -383,52 +384,77 @@ function uploadAttachments(item, cardId) {
   }
   if (!atts.length) return Promise.resolve({ uploaded: 0, total: 0 });
 
-  var method;
-  var collector;
+  var methods = [];
   if (supportsAttachmentContent(item)) {
-    method = "1.8";
-    collector = collectVia18(item, atts);
-  } else if (canUseRest(item)) {
-    method = "REST";
-    collector = collectViaRest(item);
-  } else {
+    methods.push({ name: "1.8", fn: function () { return collectVia18(item, atts); } });
+  }
+  if (canUseRest(item)) {
+    methods.push({ name: "REST", fn: function () { return collectViaRest(item); } });
+  }
+  if (canUseEws(item)) {
+    methods.push({ name: "MIME", fn: function () { return collectViaMime(item, atts); } });
+  }
+  if (!methods.length) {
     return Promise.resolve({ uploaded: 0, total: atts.length, unsupported: true });
   }
 
-  return collector.then(function (res) {
-    if (res.error) {
-      return { uploaded: 0, total: atts.length, method: method, lastError: res.error };
-    }
-    var files = res.files || [];
-    var uploaded = 0;
-    var lastError = "";
-    var chain = Promise.resolve();
-    files.forEach(function (f) {
-      chain = chain.then(function () {
-        if (!f.base64) {
-          lastError = "нет содержимого: " + (f.name || "?");
-          return null;
-        }
-        var blob = base64ToBlob(f.base64, f.contentType);
-        return window.KaitenApi
-          .uploadCardFile(cardId, blob, f.name || "attachment")
-          .then(function () { uploaded++; })
-          .catch(function (e) {
-            lastError = (e && e.message) ? e.message : String(e);
-            if (console && console.warn) {
-              console.warn("[Kaiten Add-in] Вложение не загружено:", f.name, e);
-            }
-          });
-      });
+  return tryCollectors(methods, atts, cardId, 0, "");
+}
+
+// Перебор способов получения содержимого: при пустом результате/ошибке пробуем следующий.
+function tryCollectors(methods, atts, cardId, idx, errLog) {
+  if (idx >= methods.length) {
+    return Promise.resolve({
+      uploaded: 0,
+      total: atts.length,
+      method: "—",
+      lastError: errLog || "не удалось получить содержимое",
     });
-    return chain.then(function () {
+  }
+  var mth = methods[idx];
+  return mth.fn().then(function (res) {
+    if (res.error || !res.files || !res.files.length) {
+      var e = res.error || "нет файлов с содержимым";
+      var nextLog = errLog + (errLog ? "; " : "") + mth.name + ": " + e;
+      return tryCollectors(methods, atts, cardId, idx + 1, nextLog);
+    }
+    return uploadFileList(res.files, cardId).then(function (u) {
+      var note = errLog ? " (до этого — " + errLog + ")" : "";
       return {
-        uploaded: uploaded,
-        total: files.length || atts.length,
-        method: method,
-        lastError: lastError,
+        uploaded: u.uploaded,
+        total: res.files.length,
+        method: mth.name,
+        lastError: (u.lastError || "") + note,
       };
     });
+  });
+}
+
+// Последовательная загрузка готового списка файлов { name, contentType, base64 }.
+function uploadFileList(files, cardId) {
+  var uploaded = 0;
+  var lastError = "";
+  var chain = Promise.resolve();
+  files.forEach(function (f) {
+    chain = chain.then(function () {
+      if (!f.base64) {
+        lastError = "нет содержимого: " + (f.name || "?");
+        return null;
+      }
+      var blob = base64ToBlob(f.base64, f.contentType);
+      return window.KaitenApi
+        .uploadCardFile(cardId, blob, f.name || "attachment")
+        .then(function () { uploaded++; })
+        .catch(function (e) {
+          lastError = (e && e.message) ? e.message : String(e);
+          if (console && console.warn) {
+            console.warn("[Kaiten Add-in] Вложение не загружено:", f.name, e);
+          }
+        });
+    });
+  });
+  return chain.then(function () {
+    return { uploaded: uploaded, lastError: lastError };
   });
 }
 
@@ -562,6 +588,174 @@ function collectViaRest(item) {
       resolve({ error: "REST exception: " + ((e && e.message) || e) });
     }
   });
+}
+
+// Доступен ли путь через EWS (makeEwsRequestAsync + есть itemId).
+function canUseEws(item) {
+  try {
+    return !!(item.itemId && Office.context.mailbox.makeEwsRequestAsync);
+  } catch (e) {
+    return false;
+  }
+}
+
+// Способ 3: получить письмо целиком в MIME (EWS GetItem + IncludeMimeContent)
+// и разобрать вложения на месте. GetItem — разрешённая для надстроек операция,
+// в отличие от GetAttachment. Возвращает { files:[{name,contentType,base64}], error }.
+function collectViaMime(item, atts) {
+  return new Promise(function (resolve) {
+    try {
+      var soap = buildGetItemMimeSoap(item.itemId);
+      Office.context.mailbox.makeEwsRequestAsync(soap, function (res) {
+        if (!res || res.status !== Office.AsyncResultStatus.Succeeded) {
+          resolve({ error: "MIME status=" + (res && res.status) + " " + (res && res.error && res.error.message) });
+          return;
+        }
+        var body = res.value || "";
+        var mm = /<(?:\w+:)?MimeContent[^>]*>([\s\S]*?)<\/(?:\w+:)?MimeContent>/.exec(body);
+        if (!mm) {
+          var codeM = /<(?:\w+:)?ResponseCode>([\s\S]*?)<\//.exec(body);
+          var faultM = /<(?:\w+:)?(?:faultstring|MessageText)[^>]*>([\s\S]*?)<\//.exec(body);
+          var info = codeM ? codeM[1] : (faultM ? faultM[1] : body.substring(0, 140));
+          resolve({ error: "MIME без содержимого: " + info });
+          return;
+        }
+        var raw;
+        try {
+          raw = window.atob(mm[1].replace(/\s+/g, ""));
+        } catch (e) {
+          resolve({ error: "MIME decode: " + (e && e.message) });
+          return;
+        }
+        var files = parseMimeAttachments(raw, atts);
+        resolve({ files: files });
+      });
+    } catch (e) {
+      resolve({ error: "MIME exception: " + (e && e.message) });
+    }
+  });
+}
+
+function buildGetItemMimeSoap(itemId) {
+  var id = String(itemId || "").replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+  return (
+    '<?xml version="1.0" encoding="utf-8"?>' +
+    '<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' +
+    ' xmlns:xsd="http://www.w3.org/2001/XMLSchema"' +
+    ' xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"' +
+    ' xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">' +
+    '<soap:Header><t:RequestServerVersion Version="Exchange2013"/></soap:Header>' +
+    "<soap:Body>" +
+    '<GetItem xmlns="http://schemas.microsoft.com/exchange/services/2006/messages"' +
+    ' xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">' +
+    "<ItemShape><t:BaseShape>IdOnly</t:BaseShape>" +
+    "<t:IncludeMimeContent>true</t:IncludeMimeContent></ItemShape>" +
+    '<ItemIds><t:ItemId Id="' + id + '"/></ItemIds>' +
+    "</GetItem>" +
+    "</soap:Body></soap:Envelope>"
+  );
+}
+
+// Разбор MIME-письма: находим leaf-части с Content-Transfer-Encoding: base64
+// и именем файла. Имя/тип по возможности берём из списка вложений по размеру.
+function parseMimeAttachments(raw, atts) {
+  var boundaries = {};
+  var reB = /boundary="?([^";\r\n]+)"?/gi;
+  var mb;
+  while ((mb = reB.exec(raw))) {
+    boundaries[mb[1]] = true;
+  }
+
+  var found = [];
+  var seen = {};
+  for (var b in boundaries) {
+    if (!boundaries.hasOwnProperty(b)) continue;
+    var chunks = raw.split("--" + b);
+    for (var i = 0; i < chunks.length; i++) {
+      var chunk = chunks[i];
+      var nl = 4;
+      var sep = chunk.indexOf("\r\n\r\n");
+      if (sep < 0) { sep = chunk.indexOf("\n\n"); nl = 2; }
+      if (sep < 0) continue;
+      var headers = chunk.substring(0, sep);
+      if (!/content-transfer-encoding:\s*base64/i.test(headers)) continue;
+
+      var b64 = chunk.substring(sep + nl).replace(/\s+/g, "").replace(/-+$/, "");
+      if (!b64 || b64.length < 8) continue;
+
+      var sig = b64.substring(0, 24) + ":" + b64.length;
+      if (seen[sig]) continue;
+      seen[sig] = true;
+
+      found.push({
+        name: extractMimeFilename(headers),
+        contentType: extractMimeContentType(headers),
+        base64: b64,
+      });
+    }
+  }
+
+  // Сопоставим имена/типы с реальными вложениями по размеру (декодированному).
+  var used = {};
+  for (var k = 0; k < found.length; k++) {
+    var f = found[k];
+    var approxLen = Math.floor((f.base64.length * 3) / 4);
+    var best = -1;
+    var bestDiff = 64; // допуск в байтах на паддинг/переносы
+    for (var j = 0; j < atts.length; j++) {
+      if (used[j] || typeof atts[j].size !== "number") continue;
+      var diff = Math.abs(atts[j].size - approxLen);
+      if (diff < bestDiff) { bestDiff = diff; best = j; }
+    }
+    if (best >= 0) {
+      used[best] = true;
+      f.name = atts[best].name || f.name;
+      f.contentType = atts[best].contentType || f.contentType;
+    }
+    if (!f.name) f.name = "attachment_" + (k + 1);
+  }
+  return found;
+}
+
+function extractMimeFilename(headers) {
+  var m =
+    /filename\*?=\s*"?([^";\r\n]+)"?/i.exec(headers) ||
+    /name\*?=\s*"?([^";\r\n]+)"?/i.exec(headers);
+  if (!m) return "";
+  return decodeMimeWord(m[1].replace(/"$/, ""));
+}
+
+function extractMimeContentType(headers) {
+  var m = /content-type:\s*([^;\r\n]+)/i.exec(headers);
+  return m ? m[1].trim() : "";
+}
+
+// Базовый разбор RFC2047 =?charset?B?..?= / =?charset?Q?..?= (best effort).
+function decodeMimeWord(s) {
+  try {
+    return s.replace(/=\?[^?]+\?([BbQq])\?([^?]*)\?=/g, function (all, enc, txt) {
+      if (enc.toUpperCase() === "B") {
+        return utf8Decode(window.atob(txt));
+      }
+      var q = txt.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, function (a, h) {
+        return String.fromCharCode(parseInt(h, 16));
+      });
+      return utf8Decode(q);
+    });
+  } catch (e) {
+    return s;
+  }
+}
+
+// Раскодировать байтовую строку как UTF-8 (IE11-совместимо).
+function utf8Decode(bytes) {
+  try {
+    return decodeURIComponent(escape(bytes));
+  } catch (e) {
+    return bytes;
+  }
 }
 
 // Base64 → Blob (IE11 поддерживает atob, Uint8Array и Blob).
