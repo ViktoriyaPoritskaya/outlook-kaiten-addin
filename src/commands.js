@@ -680,17 +680,27 @@ function parseMimeAttachments(raw, atts) {
       if (sep < 0) { sep = chunk.indexOf("\n\n"); nl = 2; }
       if (sep < 0) continue;
       var headers = chunk.substring(0, sep);
-      if (!/content-transfer-encoding:\s*base64/i.test(headers)) continue;
 
-      var b64 = chunk.substring(sep + nl).replace(/\s+/g, "").replace(/-+$/, "");
-      if (!b64 || b64.length < 8) continue;
+      // Пропускаем вложенные multipart-контейнеры (это не сам файл).
+      if (/content-type:\s*multipart\//i.test(headers)) continue;
 
-      var sig = b64.substring(0, 24) + ":" + b64.length;
+      var fname = extractMimeFilename(headers);
+      var isAttach = /content-disposition:\s*attachment/i.test(headers);
+      // Берём только части-файлы: с именем файла или явным attachment.
+      if (!fname && !isAttach) continue;
+
+      // Тело части — до следующего boundary; отрезаем возможный хвост "--".
+      var rawBody = chunk.substring(sep + nl).replace(/\r?\n--\s*$/, "").replace(/--\s*$/, "");
+      var cte = extractCte(headers);
+      var b64 = bodyToBase64(rawBody, cte);
+      if (!b64 || b64.length < 4) continue;
+
+      var sig = (fname || "") + ":" + b64.length + ":" + b64.substring(0, 16);
       if (seen[sig]) continue;
       seen[sig] = true;
 
       found.push({
-        name: extractMimeFilename(headers),
+        name: fname,
         contentType: extractMimeContentType(headers),
         base64: b64,
       });
@@ -730,6 +740,44 @@ function extractMimeFilename(headers) {
 function extractMimeContentType(headers) {
   var m = /content-type:\s*([^;\r\n]+)/i.exec(headers);
   return m ? m[1].trim() : "";
+}
+
+function extractCte(headers) {
+  var m = /content-transfer-encoding:\s*([^\s;\r\n]+)/i.exec(headers);
+  return m ? m[1].toLowerCase() : "";
+}
+
+// Приводит тело MIME-части к base64 в зависимости от Content-Transfer-Encoding.
+// base64 → как есть; quoted-printable → декодируем; 7bit/8bit/binary → тело уже байты.
+function bodyToBase64(body, cte) {
+  cte = cte || "";
+  if (cte === "base64") {
+    return body.replace(/[^A-Za-z0-9+/=]/g, "");
+  }
+  var binary = cte === "quoted-printable" ? decodeQuotedPrintable(body) : body;
+  return binaryToBase64(binary);
+}
+
+function decodeQuotedPrintable(s) {
+  // Мягкие переносы строк ("=" в конце строки) убираем.
+  s = s.replace(/=\r?\n/g, "");
+  return s.replace(/=([0-9A-Fa-f]{2})/g, function (a, h) {
+    return String.fromCharCode(parseInt(h, 16));
+  });
+}
+
+// Байтовая строка (символы 0–255) → base64. Чанк кратен 3, чтобы склейка была корректной.
+function binaryToBase64(binary) {
+  try {
+    if (binary.length <= 49152) return window.btoa(binary);
+    var out = "";
+    for (var i = 0; i < binary.length; i += 49152) {
+      out += window.btoa(binary.substring(i, i + 49152));
+    }
+    return out;
+  } catch (e) {
+    return "";
+  }
 }
 
 // Базовый разбор RFC2047 =?charset?B?..?= / =?charset?Q?..?= (best effort).
