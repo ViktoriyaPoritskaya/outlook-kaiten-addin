@@ -108,12 +108,16 @@ function openBoardDialog(defaultBoardId, defaultBoardTitle) {
       return;
     }
 
+    // _ts — защита от кэша: Outlook/IE кэширует окно диалога отдельно от панели,
+    // поэтому каждый раз запрашиваем свежую страницу с уникальным адресом.
     var url =
       dialogUrl() +
       "?defBoard=" +
       encodeURIComponent(defaultBoardId) +
       "&defTitle=" +
-      encodeURIComponent(defaultBoardTitle || "");
+      encodeURIComponent(defaultBoardTitle || "") +
+      "&_ts=" +
+      new Date().getTime();
 
     Office.context.ui.displayDialogAsync(
       url,
