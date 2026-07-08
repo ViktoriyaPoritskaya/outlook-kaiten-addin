@@ -425,6 +425,7 @@ function tryCollectors(methods, atts, cardId, idx, errLog) {
         total: res.files.length,
         method: mth.name,
         lastError: (u.lastError || "") + note,
+        detail: res.debug || "",
       };
     });
   });
@@ -479,6 +480,7 @@ function buildAttachmentDiag(item, summary) {
       lines.push("- способ: " + (summary.method || "?"));
       lines.push("- загружено: " + summary.uploaded + " из " + summary.total);
       if (summary.lastError) lines.push("- причина: " + summary.lastError);
+      if (summary.detail) lines.push("- детали: " + summary.detail);
     }
   }
   return lines.join("\n");
@@ -627,8 +629,8 @@ function collectViaMime(item, atts) {
           resolve({ error: "MIME decode: " + (e && e.message) });
           return;
         }
-        var files = parseMimeAttachments(raw, atts);
-        resolve({ files: files });
+        var parsed = parseMimeAttachments(raw, atts);
+        resolve({ files: parsed.files, debug: parsed.debug });
       });
     } catch (e) {
       resolve({ error: "MIME exception: " + (e && e.message) });
@@ -670,6 +672,7 @@ function parseMimeAttachments(raw, atts) {
 
   var found = [];
   var seen = {};
+  var dbg = [];
   for (var b in boundaries) {
     if (!boundaries.hasOwnProperty(b)) continue;
     var chunks = raw.split("--" + b);
@@ -681,18 +684,23 @@ function parseMimeAttachments(raw, atts) {
       if (sep < 0) continue;
       var headers = chunk.substring(0, sep);
 
+      var ct = extractMimeContentType(headers).toLowerCase();
       // Пропускаем вложенные multipart-контейнеры (это не сам файл).
-      if (/content-type:\s*multipart\//i.test(headers)) continue;
+      if (ct.indexOf("multipart/") === 0) continue;
 
       var fname = extractMimeFilename(headers);
       var isAttach = /content-disposition:\s*attachment/i.test(headers);
-      // Берём только части-файлы: с именем файла или явным attachment.
-      if (!fname && !isAttach) continue;
+      var hasCid = /content-id:/i.test(headers);
+      var isBodyText = ct.indexOf("text/plain") === 0 || ct.indexOf("text/html") === 0;
+      // Часть — файл, если есть имя/attachment/Content-ID, либо тип не текстовый.
+      var isFile = !!fname || isAttach || hasCid || (ct && !isBodyText);
+      if (!isFile) continue;
 
       // Тело части — до следующего boundary; отрезаем возможный хвост "--".
       var rawBody = chunk.substring(sep + nl).replace(/\r?\n--\s*$/, "").replace(/--\s*$/, "");
       var cte = extractCte(headers);
       var b64 = bodyToBase64(rawBody, cte);
+      dbg.push((fname || ct || "?") + "/" + (cte || "none") + "/" + (b64 ? b64.length : 0));
       if (!b64 || b64.length < 4) continue;
 
       var sig = (fname || "") + ":" + b64.length + ":" + b64.substring(0, 16);
@@ -713,20 +721,21 @@ function parseMimeAttachments(raw, atts) {
     var f = found[k];
     var approxLen = Math.floor((f.base64.length * 3) / 4);
     var best = -1;
-    var bestDiff = 64; // допуск в байтах на паддинг/переносы
+    var bestDiff = 1e9;
     for (var j = 0; j < atts.length; j++) {
       if (used[j] || typeof atts[j].size !== "number") continue;
       var diff = Math.abs(atts[j].size - approxLen);
       if (diff < bestDiff) { bestDiff = diff; best = j; }
     }
-    if (best >= 0) {
+    // Принимаем сопоставление, если размеры близки (допуск на паддинг/переносы).
+    if (best >= 0 && bestDiff <= 128) {
       used[best] = true;
       f.name = atts[best].name || f.name;
       f.contentType = atts[best].contentType || f.contentType;
     }
     if (!f.name) f.name = "attachment_" + (k + 1);
   }
-  return found;
+  return { files: found, debug: "части: " + (dbg.length ? dbg.join(", ") : "нет") };
 }
 
 function extractMimeFilename(headers) {
