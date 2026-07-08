@@ -214,6 +214,14 @@ function run(item, boardId) {
       return null;
     })
     .then(function () {
+      // Загружаем сами файлы вложений в карточку (best effort).
+      return uploadAttachments(item, card.id).catch(function (e) {
+        if (console && console.warn) {
+          console.warn("[Kaiten Add-in] Не удалось загрузить вложения:", e);
+        }
+      });
+    })
+    .then(function () {
       // Прикрепляем ссылку на исходное письмо как external link (best effort).
       try {
         if (item.itemId && Office.context.mailbox.convertToRestId) {
@@ -320,6 +328,86 @@ function buildDescription(data, cfg) {
   lines.push(truncate(data.body, cfg.MAX_BODY_LENGTH));
 
   return lines.join("\n");
+}
+
+// Проверяет, умеет ли текущий Outlook отдавать содержимое вложений
+// (getAttachmentContentAsync появился в Mailbox 1.8).
+function supportsAttachmentContent(item) {
+  try {
+    if (Office.context.requirements && Office.context.requirements.isSetSupported) {
+      if (!Office.context.requirements.isSetSupported("Mailbox", "1.8")) return false;
+    }
+    return typeof item.getAttachmentContentAsync === "function";
+  } catch (e) {
+    return false;
+  }
+}
+
+// Загружает все файловые вложения письма в карточку. Best effort и последовательно,
+// чтобы не перегружать API. Если Outlook не поддерживает выгрузку — тихо пропускаем.
+function uploadAttachments(item, cardId) {
+  if (!supportsAttachmentContent(item)) return Promise.resolve();
+
+  var atts = [];
+  var all = item.attachments || [];
+  for (var i = 0; i < all.length; i++) {
+    var a = all[i];
+    // Берём только файлы (не вложенные письма/облачные ссылки).
+    if (!a.attachmentType || a.attachmentType === "file") atts.push(a);
+  }
+  if (!atts.length) return Promise.resolve();
+
+  var chain = Promise.resolve();
+  atts.forEach(function (att) {
+    chain = chain.then(function () {
+      return getAttachmentBlob(item, att).then(function (blob) {
+        if (blob) {
+          return window.KaitenApi.uploadCardFile(cardId, blob, att.name || "attachment");
+        }
+        return null;
+      });
+    });
+  });
+  return chain;
+}
+
+// Читает содержимое одного вложения и превращает его в Blob.
+function getAttachmentBlob(item, att) {
+  return new Promise(function (resolve) {
+    try {
+      item.getAttachmentContentAsync(att.id, function (res) {
+        if (!res || res.status !== Office.AsyncResultStatus.Succeeded || !res.value) {
+          resolve(null);
+          return;
+        }
+        var content = res.value.content;
+        var format = res.value.format;
+        try {
+          if (format === Office.MailboxEnums.AttachmentContentFormat.Base64) {
+            resolve(base64ToBlob(content, att.contentType));
+          } else {
+            // Url/Eml/ICalendar как файл не грузим.
+            resolve(null);
+          }
+        } catch (e) {
+          resolve(null);
+        }
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+// Base64 → Blob (IE11 поддерживает atob, Uint8Array и Blob).
+function base64ToBlob(b64, contentType) {
+  var binary = window.atob(b64);
+  var len = binary.length;
+  var bytes = new Uint8Array(len);
+  for (var i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: contentType || "application/octet-stream" });
 }
 
 // Имя кастомного поля Kaiten, куда пишем отправителя. Можно переопределить

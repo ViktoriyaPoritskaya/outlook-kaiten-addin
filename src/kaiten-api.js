@@ -138,6 +138,44 @@ window.KaitenApi = (function () {
   }
 
   /**
+   * Загрузить файл (вложение письма) в карточку.
+   * POST /api/latest/cards/{cardId}/files (multipart/form-data, поле "file").
+   * Content-Type НЕ выставляем вручную — браузер сам добавит boundary.
+   */
+  function uploadCardFile(cardId, blob, filename) {
+    var url, token;
+    try {
+      url = getBaseUrl() + "/api/latest/cards/" + cardId + "/files";
+      token = getToken();
+    } catch (e) {
+      return Promise.reject(e);
+    }
+
+    var form = new FormData();
+    form.append("file", blob, filename || "attachment");
+
+    return fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        Authorization: "Bearer " + token,
+      },
+      body: form,
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return resp.text().then(function (text) {
+          var msg = "Kaiten API " + resp.status + " " + resp.statusText + (text ? ": " + text : "");
+          var error = new Error(msg);
+          error.status = resp.status;
+          throw error;
+        });
+      }
+      if (resp.status === 204) return null;
+      return resp.json();
+    });
+  }
+
+  /**
    * Прикрепить готовый внешний URL к карточке (например, ссылку на письмо в Outlook).
    * POST /api/latest/cards/{cardId}/external-links
    */
@@ -161,6 +199,7 @@ window.KaitenApi = (function () {
     listCustomProperties: listCustomProperties,
     createCard: createCard,
     updateCard: updateCard,
+    uploadCardFile: uploadCardFile,
     addExternalLink: addExternalLink,
     getCardUrl: getCardUrl,
   };
