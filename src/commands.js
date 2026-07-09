@@ -435,6 +435,7 @@ function uploadAttachments(item, cardId) {
   var results = new Array(atts.length);
   var methodsUsed = [];
   var errs = [];
+  var details = [];
 
   var chain = Promise.resolve();
   steps.forEach(function (step) {
@@ -444,6 +445,7 @@ function uploadAttachments(item, cardId) {
       return step.fn(item, atts, results).then(function (r) {
         if (r && r.filled) methodsUsed.push(step.name);
         if (r && r.error) errs.push(step.name + ": " + r.error);
+        if (r && r.debug) details.push(step.name + " " + r.debug);
         return null;
       });
     });
@@ -467,6 +469,7 @@ function uploadAttachments(item, cardId) {
         total: atts.length,
         method: methodsUsed.join("+") || "—",
         lastError: lastError,
+        detail: details.join(" | "),
       };
     });
   });
@@ -632,7 +635,7 @@ function fillRest(item, atts, results) {
 function fillMime(item, atts, results) {
   return collectViaMime(item, atts).then(function (r) {
     if (r.error) return { filled: false, error: r.error };
-    return { filled: fillFromFiles(atts, results, r.files || []), error: "" };
+    return { filled: fillFromFiles(atts, results, r.files || []), error: "", debug: r.debug };
   });
 }
 
@@ -776,65 +779,44 @@ function buildGetItemMimeSoap(itemId) {
   );
 }
 
-// Разбор MIME-письма: находим leaf-части с Content-Transfer-Encoding: base64
-// и именем файла. Имя/тип по возможности берём из списка вложений по размеру.
+// Разбор MIME-письма ПО ЕГО РЕАЛЬНОЙ СТРУКТУРЕ multipart (рекурсивно).
+// Прошлый вариант искал все boundary во всём письме и делил по каждому подряд —
+// из-за этого base64 частей резался и путался (файлы приходили битыми/не теми).
+// Здесь: разбираем дерево частей строго по boundary своего уровня.
 function parseMimeAttachments(raw, atts) {
-  var boundaries = {};
-  var reB = /boundary="?([^";\r\n]+)"?/gi;
-  var mb;
-  while ((mb = reB.exec(raw))) {
-    boundaries[mb[1]] = true;
-  }
+  var top = splitHeadersBody(raw);
+  var leaves = [];
+  collectMimeLeaves(top.headers, top.body, leaves, 0);
 
   var found = [];
-  var seen = {};
   var dbg = [];
-  for (var b in boundaries) {
-    if (!boundaries.hasOwnProperty(b)) continue;
-    var chunks = raw.split("--" + b);
-    for (var i = 0; i < chunks.length; i++) {
-      var chunk = chunks[i];
-      var nl = 4;
-      var sep = chunk.indexOf("\r\n\r\n");
-      if (sep < 0) { sep = chunk.indexOf("\n\n"); nl = 2; }
-      if (sep < 0) continue;
-      var headers = chunk.substring(0, sep);
+  for (var i = 0; i < leaves.length; i++) {
+    var h = leaves[i].headers; // заголовки уже развёрнуты (unfolded)
+    var ct = extractMimeContentType(h).toLowerCase();
+    var fname = extractMimeFilename(h);
+    var disp = /content-disposition:\s*([^;\r\n]+)/i.exec(h);
+    var isAttach = !!(disp && /attachment/i.test(disp[1]));
+    var hasCid = /content-id:/i.test(h);
+    var isText = ct.indexOf("text/plain") === 0 || ct.indexOf("text/html") === 0;
+    // Тело письма (текст без имени, без пометки вложения и без Content-ID) — пропускаем.
+    if (isText && !fname && !isAttach && !hasCid) continue;
 
-      var ct = extractMimeContentType(headers).toLowerCase();
-      // Пропускаем вложенные multipart-контейнеры (это не сам файл).
-      if (ct.indexOf("multipart/") === 0) continue;
+    // У встроенных картинок имени часто нет — берём его из Content-ID (там обычно image001.png).
+    if (!fname && hasCid) fname = filenameFromContentId(h);
 
-      var fname = extractMimeFilename(headers);
-      var isAttach = /content-disposition:\s*attachment/i.test(headers);
-      var hasCid = /content-id:/i.test(headers);
-      var isBodyText = ct.indexOf("text/plain") === 0 || ct.indexOf("text/html") === 0;
-      // Часть — файл, если есть имя/attachment/Content-ID, либо тип не текстовый.
-      var isFile = !!fname || isAttach || hasCid || (ct && !isBodyText);
-      if (!isFile) continue;
+    var cte = extractCte(h);
+    var b64 = bodyToBase64(leaves[i].body, cte);
+    dbg.push((fname || ct || "?") + "/" + (cte || "none") + "/" + (b64 ? b64.length : 0));
+    if (!b64 || b64.length < 4) continue;
 
-      // Тело части — до следующего boundary; отрезаем возможный хвост "--".
-      var rawBody = chunk.substring(sep + nl).replace(/\r?\n--\s*$/, "").replace(/--\s*$/, "");
-      var cte = extractCte(headers);
-      var b64 = bodyToBase64(rawBody, cte);
-      dbg.push((fname || ct || "?") + "/" + (cte || "none") + "/" + (b64 ? b64.length : 0));
-      if (!b64 || b64.length < 4) continue;
-
-      var sig = (fname || "") + ":" + b64.length + ":" + b64.substring(0, 16);
-      if (seen[sig]) continue;
-      seen[sig] = true;
-
-      found.push({
-        name: fname,
-        contentType: extractMimeContentType(headers),
-        base64: b64,
-      });
-    }
+    found.push({ name: fname, contentType: extractMimeContentType(h), base64: b64 });
   }
 
-  // Сопоставим имена/типы с реальными вложениями по размеру (декодированному).
+  // Если у части не нашлось имени — добираем его сопоставлением по декодированному размеру.
   var used = {};
   for (var k = 0; k < found.length; k++) {
     var f = found[k];
+    if (f.name) continue;
     var approxLen = Math.floor((f.base64.length * 3) / 4);
     var best = -1;
     var bestDiff = 1e9;
@@ -843,21 +825,95 @@ function parseMimeAttachments(raw, atts) {
       var diff = Math.abs(atts[j].size - approxLen);
       if (diff < bestDiff) { bestDiff = diff; best = j; }
     }
-    // Принимаем сопоставление, если размеры близки (допуск на паддинг/переносы).
-    if (best >= 0 && bestDiff <= 128) {
+    if (best >= 0 && bestDiff <= 256) {
       used[best] = true;
-      f.name = atts[best].name || f.name;
+      f.name = atts[best].name;
       f.contentType = atts[best].contentType || f.contentType;
+    } else {
+      f.name = "attachment_" + (k + 1);
     }
-    if (!f.name) f.name = "attachment_" + (k + 1);
   }
   return { files: found, debug: "части: " + (dbg.length ? dbg.join(", ") : "нет") };
 }
 
+// Делит текст на заголовки (развёрнутые) и тело по первой пустой строке.
+function splitHeadersBody(s) {
+  s = String(s || "");
+  var nl = 4;
+  var idx = s.indexOf("\r\n\r\n");
+  if (idx < 0) { idx = s.indexOf("\n\n"); nl = 2; }
+  if (idx < 0) return { headers: unfoldHeaders(s), body: "" };
+  return { headers: unfoldHeaders(s.substring(0, idx)), body: s.substring(idx + nl) };
+}
+
+// Разворачивает «сложенные» заголовки: продолжение строки начинается с пробела/таба.
+function unfoldHeaders(h) {
+  return String(h || "").replace(/\r?\n[ \t]+/g, " ");
+}
+
+// Рекурсивно собирает листовые (не-multipart) части письма в out.
+function collectMimeLeaves(headers, body, out, depth) {
+  if (depth > 20) return; // защита от аномально глубоко вложенных писем
+  var ct = extractMimeContentType(headers).toLowerCase();
+  if (ct.indexOf("multipart/") === 0) {
+    var boundary = extractBoundary(headers);
+    if (!boundary) { out.push({ headers: headers, body: body }); return; }
+    var segs = splitByBoundary(body, boundary);
+    for (var i = 0; i < segs.length; i++) {
+      var sub = splitHeadersBody(segs[i]);
+      collectMimeLeaves(sub.headers, sub.body, out, depth + 1);
+    }
+  } else {
+    out.push({ headers: headers, body: body });
+  }
+}
+
+function extractBoundary(headers) {
+  var m = /boundary\s*=\s*"([^"]+)"/i.exec(headers) ||
+          /boundary\s*=\s*([^;\r\n]+)/i.exec(headers);
+  return m ? m[1].replace(/\s+$/, "") : "";
+}
+
+// Делит тело multipart на части по «--boundary». Возвращает содержимое частей
+// без преамбулы и без завершающего «--boundary--».
+function splitByBoundary(body, boundary) {
+  var out = [];
+  var pieces = String(body || "").split("--" + boundary);
+  // pieces[0] — преамбула до первого boundary, пропускаем.
+  for (var i = 1; i < pieces.length; i++) {
+    var p = pieces[i];
+    // Закрывающий boundary имеет вид «--boundary--».
+    if (p.substring(0, 2) === "--") break;
+    // Убираем остаток строки самого boundary (перевод строки/пробелы после маркера).
+    p = p.replace(/^[^\r\n]*\r?\n/, "");
+    out.push(p);
+  }
+  return out;
+}
+
+// Достаёт имя файла из Content-ID вида «<image001.png@01D...>», если оно там есть.
+function filenameFromContentId(headers) {
+  var m = /content-id:\s*<?([^@>\r\n]+)/i.exec(headers);
+  if (!m) return "";
+  var cand = m[1].replace(/^\s+|\s+$/g, "");
+  return /\.[a-z0-9]{2,5}$/i.test(cand) ? cand : "";
+}
+
 function extractMimeFilename(headers) {
+  // RFC 2231: filename*=UTF-8''%D0%A2... — имя в percent-кодировке (часто кириллица).
+  var m2231 =
+    /filename\*\s*=\s*[^'"\r\n]*''([^;\r\n]+)/i.exec(headers) ||
+    /name\*\s*=\s*[^'"\r\n]*''([^;\r\n]+)/i.exec(headers);
+  if (m2231) {
+    try {
+      return decodeURIComponent(m2231[1].replace(/\s+$/, ""));
+    } catch (e) {
+      /* не percent-кодировка — попробуем обычный разбор ниже */
+    }
+  }
   var m =
-    /filename\*?=\s*"?([^";\r\n]+)"?/i.exec(headers) ||
-    /name\*?=\s*"?([^";\r\n]+)"?/i.exec(headers);
+    /filename\s*=\s*"?([^";\r\n]+)"?/i.exec(headers) ||
+    /\bname\s*=\s*"?([^";\r\n]+)"?/i.exec(headers);
   if (!m) return "";
   return decodeMimeWord(m[1].replace(/"$/, ""));
 }
