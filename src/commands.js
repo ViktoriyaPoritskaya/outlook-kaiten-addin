@@ -398,11 +398,14 @@ function supportsAttachmentContent(item) {
   }
 }
 
-// Загружает все файловые вложения письма в карточку. Best effort, последовательно.
-// Способы пробуются по очереди, пока какой-то не отдаст содержимое:
+// Загружает все файловые вложения письма в карточку. Best effort.
+// Способы применяются ПО ОЧЕРЕДИ И ДОПОЛНЯЮТ ДРУГ ДРУГА по каждому вложению:
 //   1) getAttachmentContentAsync (Mailbox 1.8) — современные клиенты;
 //   2) Outlook REST API (getCallbackTokenAsync, с 1.5);
 //   3) EWS GetItem + MimeContent (с 1.5) — разбор письма в MIME на месте.
+// Важно: способ 1.8 в Outlook 2016 иногда отдаёт обычные файлы (Word/Excel/PDF),
+// но не встроенные картинки (isInline). Поэтому то, что не смог собрать один способ,
+// добирается следующим — иначе часть вложений (обычно inline-картинки) молча теряется.
 // Возвращает Promise со сводкой { uploaded, total, method, lastError, unsupported }.
 function uploadAttachments(item, cardId) {
   var atts = [];
@@ -414,51 +417,114 @@ function uploadAttachments(item, cardId) {
   }
   if (!atts.length) return Promise.resolve({ uploaded: 0, total: 0 });
 
-  var methods = [];
+  var steps = [];
   if (supportsAttachmentContent(item)) {
-    methods.push({ name: "1.8", fn: function () { return collectVia18(item, atts); } });
+    steps.push({ name: "1.8", fn: fill18 });
   }
   if (canUseRest(item)) {
-    methods.push({ name: "REST", fn: function () { return collectViaRest(item); } });
+    steps.push({ name: "REST", fn: fillRest });
   }
   if (canUseEws(item)) {
-    methods.push({ name: "MIME", fn: function () { return collectViaMime(item, atts); } });
+    steps.push({ name: "MIME", fn: fillMime });
   }
-  if (!methods.length) {
+  if (!steps.length) {
     return Promise.resolve({ uploaded: 0, total: atts.length, unsupported: true });
   }
 
-  return tryCollectors(methods, atts, cardId, 0, "");
-}
+  // results[i] — { name, contentType, base64 } по каждому вложению atts[i] (по мере сбора).
+  var results = new Array(atts.length);
+  var methodsUsed = [];
+  var errs = [];
 
-// Перебор способов получения содержимого: при пустом результате/ошибке пробуем следующий.
-function tryCollectors(methods, atts, cardId, idx, errLog) {
-  if (idx >= methods.length) {
-    return Promise.resolve({
-      uploaded: 0,
-      total: atts.length,
-      method: "—",
-      lastError: errLog || "не удалось получить содержимое",
+  var chain = Promise.resolve();
+  steps.forEach(function (step) {
+    chain = chain.then(function () {
+      // Все вложения уже собраны — дальше способы не нужны.
+      if (countFilled(results) >= atts.length) return null;
+      return step.fn(item, atts, results).then(function (r) {
+        if (r && r.filled) methodsUsed.push(step.name);
+        if (r && r.error) errs.push(step.name + ": " + r.error);
+        return null;
+      });
     });
-  }
-  var mth = methods[idx];
-  return mth.fn().then(function (res) {
-    if (res.error || !res.files || !res.files.length) {
-      var e = res.error || "нет файлов с содержимым";
-      var nextLog = errLog + (errLog ? "; " : "") + mth.name + ": " + e;
-      return tryCollectors(methods, atts, cardId, idx + 1, nextLog);
+  });
+
+  return chain.then(function () {
+    var files = [];
+    for (var i = 0; i < atts.length; i++) {
+      if (results[i] && results[i].base64) files.push(results[i]);
     }
-    return uploadFileList(res.files, cardId).then(function (u) {
-      var note = errLog ? " (до этого — " + errLog + ")" : "";
+    return uploadFileList(files, cardId).then(function (u) {
+      var missing = atts.length - files.length;
+      var lastError = u.lastError || "";
+      if (missing > 0) {
+        var detail = errs.length ? errs.join("; ") : "содержимое не получено";
+        lastError = (lastError ? lastError + "; " : "") +
+          "не получено содержимое " + missing + " вложений (" + detail + ")";
+      }
       return {
         uploaded: u.uploaded,
-        total: res.files.length,
-        method: mth.name,
-        lastError: (u.lastError || "") + note,
-        detail: res.debug || "",
+        total: atts.length,
+        method: methodsUsed.join("+") || "—",
+        lastError: lastError,
       };
     });
   });
+}
+
+// Сколько вложений уже имеют собранное содержимое.
+function countFilled(results) {
+  var n = 0;
+  for (var i = 0; i < results.length; i++) {
+    if (results[i] && results[i].base64) n++;
+  }
+  return n;
+}
+
+// Находит индекс ещё не собранного вложения по имени файла (без учёта регистра).
+function matchByName(atts, results, name) {
+  if (!name) return -1;
+  var t = String(name).toLowerCase();
+  for (var i = 0; i < atts.length; i++) {
+    if (results[i] && results[i].base64) continue;
+    if (String(atts[i].name || "").toLowerCase() === t) return i;
+  }
+  return -1;
+}
+
+// Находит индекс ещё не собранного вложения по близости размера (допуск на паддинг base64).
+function matchBySize(atts, results, base64) {
+  if (!base64) return -1;
+  var approx = Math.floor((base64.length * 3) / 4);
+  var best = -1;
+  var bestDiff = 1e9;
+  for (var i = 0; i < atts.length; i++) {
+    if (results[i] && results[i].base64) continue;
+    if (typeof atts[i].size !== "number") continue;
+    var diff = Math.abs(atts[i].size - approx);
+    if (diff < bestDiff) { bestDiff = diff; best = i; }
+  }
+  return (best >= 0 && bestDiff <= 128) ? best : -1;
+}
+
+// Раскладывает готовые файлы (из REST/MIME) по ещё не собранным вложениям:
+// сначала по имени, при неудаче — по размеру. Возвращает true, если что-то добавили.
+function fillFromFiles(atts, results, files) {
+  var filled = false;
+  for (var k = 0; k < files.length; k++) {
+    var f = files[k];
+    if (!f || !f.base64) continue;
+    var idx = matchByName(atts, results, f.name);
+    if (idx < 0) idx = matchBySize(atts, results, f.base64);
+    if (idx < 0) continue;
+    results[idx] = {
+      name: atts[idx].name || f.name,
+      contentType: atts[idx].contentType || f.contentType,
+      base64: f.base64,
+    };
+    filled = true;
+  }
+  return filled;
 }
 
 // Последовательная загрузка готового списка файлов { name, contentType, base64 }.
@@ -516,37 +582,57 @@ function buildAttachmentDiag(item, summary) {
   return lines.join("\n");
 }
 
-// Способ 1: собрать файлы через getAttachmentContentAsync (Mailbox 1.8).
-// Возвращает { files:[{name,contentType,base64}], error }.
-function collectVia18(item, atts) {
-  var files = [];
+// Способ 1: getAttachmentContentAsync (Mailbox 1.8) — по каждому ещё не собранному
+// вложению отдельно. Заполняет results[i] напрямую (индекс совпадает с atts).
+function fill18(item, atts, results) {
   var lastErr = "";
+  var filled = false;
   var chain = Promise.resolve();
-  atts.forEach(function (att) {
+  atts.forEach(function (att, i) {
     chain = chain.then(function () {
+      if (results[i] && results[i].base64) return null;
       return new Promise(function (resolve) {
         try {
           item.getAttachmentContentAsync(att.id, function (res) {
             if (
               res && res.status === Office.AsyncResultStatus.Succeeded && res.value &&
-              res.value.format === Office.MailboxEnums.AttachmentContentFormat.Base64
+              res.value.format === Office.MailboxEnums.AttachmentContentFormat.Base64 &&
+              res.value.content
             ) {
-              files.push({ name: att.name, contentType: att.contentType, base64: res.value.content });
+              results[i] = { name: att.name, contentType: att.contentType, base64: res.value.content };
+              filled = true;
             } else {
-              lastErr = "1.8 status=" + (res && res.status) +
+              lastErr = (att.name || "?") + ": status=" + (res && res.status) +
                 (res && res.value ? " format=" + res.value.format : "");
             }
             resolve();
           });
         } catch (e) {
-          lastErr = "1.8 exception: " + (e && e.message);
+          lastErr = "exception: " + (e && e.message);
           resolve();
         }
       });
     });
   });
   return chain.then(function () {
-    return { files: files, error: files.length ? "" : lastErr };
+    return { filled: filled, error: countFilled(results) < atts.length ? lastErr : "" };
+  });
+}
+
+// Способ 2: Outlook REST API — тянет все вложения письма разом, затем раскладывает
+// содержимое по ещё не собранным atts (по имени/размеру).
+function fillRest(item, atts, results) {
+  return collectViaRest(item).then(function (r) {
+    if (r.error) return { filled: false, error: r.error };
+    return { filled: fillFromFiles(atts, results, r.files || []), error: "" };
+  });
+}
+
+// Способ 3: EWS GetItem + разбор MIME — тоже добор оставшихся вложений.
+function fillMime(item, atts, results) {
+  return collectViaMime(item, atts).then(function (r) {
+    if (r.error) return { filled: false, error: r.error };
+    return { filled: fillFromFiles(atts, results, r.files || []), error: "" };
   });
 }
 
